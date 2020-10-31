@@ -98,6 +98,8 @@
 	shutdown_reason = normal :: any()
 }).
 
+-include("cowboy.hrl").
+
 %% Because the HTTP/1.1 and HTTP/2 handshakes are so different,
 %% this function is necessary to figure out whether a request
 %% is trying to upgrade to the Websocket protocol.
@@ -559,10 +561,10 @@ handler_call(State=#state{handler=Handler}, HandlerState,
 			end;
 		{stop, HandlerState2} ->
 			websocket_close(State, HandlerState2, stop)
-	catch Class:Reason:Stacktrace ->
+	catch ?CATCH(Class, Reason, _Stacktrace) ->
 		websocket_send_close(State, {crash, Class, Reason}),
 		handler_terminate(State, HandlerState, {crash, Class, Reason}),
-		erlang:raise(Class, Reason, Stacktrace)
+		erlang:raise(Class, Reason, ?STACK(_Stacktrace))
 	end.
 
 -spec handler_call_result(#state{}, any(), parse_state(), fun(), commands()) -> no_return().

@@ -124,6 +124,8 @@
 	children = cowboy_children:init() :: cowboy_children:children()
 }).
 
+-include("cowboy.hrl").
+
 -spec init(pid(), ranch:ref(), inet:socket(), module(),
 	ranch_proxy_header:proxy_info() | undefined, cowboy:opts()) -> ok.
 init(Parent, Ref, Socket, Transport, ProxyHeader, Opts) ->
@@ -394,10 +396,10 @@ data_frame(State0=#state{opts=Opts, flow=Flow, streams=Streams}, StreamID, IsFin
 							flow=max(0, StreamFlow - Size), state=StreamState}}},
 						StreamID),
 					commands(State, StreamID, Commands)
-			catch Class:Exception:Stacktrace ->
+			catch ?CATCH(Class, Exception, _Stacktrace) ->
 				cowboy:log(cowboy_stream:make_error_log(data,
 					[StreamID, IsFin, Data, StreamState0],
-					Class, Exception, Stacktrace), Opts),
+					Class, Exception, ?STACK(_Stacktrace)), Opts),
 				reset_stream(State0, StreamID, {internal_error, {Class, Exception},
 					'Unhandled exception in cowboy_stream:data/4.'})
 			end;
@@ -501,10 +503,10 @@ headers_frame(State=#state{opts=Opts, streams=Streams}, StreamID, Req) ->
 			commands(State#state{
 				streams=Streams#{StreamID => #stream{state=StreamState}}},
 				StreamID, Commands)
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(init,
 			[StreamID, Req, Opts],
-			Class, Exception, Stacktrace), Opts),
+			Class, Exception, ?STACK(_Stacktrace)), Opts),
 		reset_stream(State, StreamID, {internal_error, {Class, Exception},
 			'Unhandled exception in cowboy_stream:init/3.'})
 	end.
@@ -528,10 +530,10 @@ early_error(State0=#state{ref=Ref, opts=Opts, peer=Peer},
 	try cowboy_stream:early_error(StreamID, Reason, PartialReq, Resp, Opts) of
 		{response, StatusCode, RespHeaders, RespBody} ->
 			send_response(State0, StreamID, StatusCode, RespHeaders, RespBody)
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(early_error,
 			[StreamID, Reason, PartialReq, Resp, Opts],
-			Class, Exception, Stacktrace), Opts),
+			Class, Exception, ?STACK(_Stacktrace)), Opts),
 		%% We still need to send an error response, so send what we initially
 		%% wanted to send. It's better than nothing.
 		send_headers(State0, StreamID, fin, StatusCode0, RespHeaders0)
@@ -589,10 +591,10 @@ info(State=#state{opts=Opts, http2_machine=HTTP2Machine, streams=Streams}, Strea
 				{Commands, StreamState} ->
 					commands(State#state{streams=Streams#{StreamID => Stream#stream{state=StreamState}}},
 						StreamID, Commands)
-			catch Class:Exception:Stacktrace ->
+			catch ?CATCH(Class, Exception, _Stacktrace) ->
 				cowboy:log(cowboy_stream:make_error_log(info,
 					[StreamID, Msg, StreamState0],
-					Class, Exception, Stacktrace), Opts),
+					Class, Exception, ?STACK(_Stacktrace)), Opts),
 				reset_stream(State, StreamID, {internal_error, {Class, Exception},
 					'Unhandled exception in cowboy_stream:info/3.'})
 			end;
@@ -1121,10 +1123,10 @@ terminate_stream(State=#state{flow=Flow, streams=Streams0, children=Children0}, 
 terminate_stream_handler(#state{opts=Opts}, StreamID, Reason, StreamState) ->
 	try
 		cowboy_stream:terminate(StreamID, Reason, StreamState)
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(terminate,
 			[StreamID, Reason, StreamState],
-			Class, Exception, Stacktrace), Opts)
+			Class, Exception, ?STACK(_Stacktrace)), Opts)
 	end.
 
 %% System callbacks.

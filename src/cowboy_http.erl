@@ -154,6 +154,8 @@
 -include_lib("cowlib/include/cow_inline.hrl").
 -include_lib("cowlib/include/cow_parse.hrl").
 
+-include("cowboy.hrl").
+
 -spec init(pid(), ranch:ref(), inet:socket(), module(),
 	ranch_proxy_header:proxy_info(), cowboy:opts()) -> ok.
 init(Parent, Ref, Socket, Transport, ProxyHeader, Opts) ->
@@ -358,10 +360,10 @@ after_parse({request, Req=#{streamid := StreamID, method := Method,
 			end,
 			State = set_timeout(State1, idle_timeout),
 			parse(Buffer, commands(State, StreamID, Commands))
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(init,
 			[StreamID, Req, Opts],
-			Class, Exception, Stacktrace), Opts),
+			Class, Exception, ?STACK(_Stacktrace)), Opts),
 		early_error(500, State0, {internal_error, {Class, Exception},
 			'Unhandled exception in cowboy_stream:init/3.'}, Req),
 		parse(Buffer, State0)
@@ -380,10 +382,10 @@ after_parse({data, StreamID, IsFin, Data, State0=#state{opts=Opts, buffer=Buffer
 			end),
 			State = update_flow(IsFin, Data, State1#state{streams=Streams}),
 			parse(Buffer, commands(State, StreamID, Commands))
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(data,
 			[StreamID, IsFin, Data, StreamState0],
-			Class, Exception, Stacktrace), Opts),
+			Class, Exception, ?STACK(_Stacktrace)), Opts),
 		%% @todo Should call parse after this.
 		stream_terminate(State0, StreamID, {internal_error, {Class, Exception},
 			'Unhandled exception in cowboy_stream:data/4.'})
@@ -936,10 +938,10 @@ info(State=#state{opts=Opts, streams=Streams0}, StreamID, Msg) ->
 					Streams = lists:keyreplace(StreamID, #stream.id, Streams0,
 						Stream#stream{state=StreamState}),
 					commands(State#state{streams=Streams}, StreamID, Commands)
-			catch Class:Exception:Stacktrace ->
+			catch ?CATCH(Class, Exception, _Stacktrace) ->
 				cowboy:log(cowboy_stream:make_error_log(info,
 					[StreamID, Msg, StreamState0],
-					Class, Exception, Stacktrace), Opts),
+					Class, Exception, ?STACK(_Stacktrace)), Opts),
 				stream_terminate(State, StreamID, {internal_error, {Class, Exception},
 					'Unhandled exception in cowboy_stream:info/3.'})
 			end;
@@ -1329,10 +1331,10 @@ stream_next(State0=#state{opts=Opts, active=Active, out_streamid=OutStreamID, st
 stream_call_terminate(StreamID, Reason, StreamState, #state{opts=Opts}) ->
 	try
 		cowboy_stream:terminate(StreamID, Reason, StreamState)
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(terminate,
 			[StreamID, Reason, StreamState],
-			Class, Exception, Stacktrace), Opts)
+			Class, Exception, ?STACK(_Stacktrace)), Opts)
 	end.
 
 maybe_req_close(#state{opts=#{http10_keepalive := false}}, _, 'HTTP/1.0') ->
@@ -1429,10 +1431,10 @@ early_error(StatusCode0, #state{socket=Socket, transport=Transport,
 				%% @todo Technically we allow the sendfile tuple.
 				RespBody
 			])
-	catch Class:Exception:Stacktrace ->
+	catch ?CATCH(Class, Exception, _Stacktrace) ->
 		cowboy:log(cowboy_stream:make_error_log(early_error,
 			[StreamID, Reason, PartialReq, Resp, Opts],
-			Class, Exception, Stacktrace), Opts),
+			Class, Exception, ?STACK(_Stacktrace)), Opts),
 		%% We still need to send an error response, so send what we initially
 		%% wanted to send. It's better than nothing.
 		Transport:send(Socket, cow_http:response(StatusCode0,

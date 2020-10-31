@@ -40,6 +40,8 @@
 	stream_body_status = normal :: normal | blocking | blocked
 }).
 
+-include("cowboy.hrl").
+
 -spec init(cowboy_stream:streamid(), cowboy_req:req(), cowboy:opts())
 	-> {[{spawn, pid(), timeout()}], #state{}}.
 init(StreamID, Req=#{ref := Ref}, Opts) ->
@@ -290,8 +292,8 @@ request_process(Req, Env, Middlewares) ->
 	try
 		execute(Req, Env, Middlewares)
 	catch
-		exit:Reason:Stacktrace ->
-			erlang:raise(exit, {Reason, Stacktrace}, Stacktrace)
+		?CATCH(exit, Reason, _Stacktrace) ->
+			erlang:raise(exit, {Reason, ?STACK(_Stacktrace)}, ?STACK(_Stacktrace))
 	end.
 
 execute(_, _, []) ->

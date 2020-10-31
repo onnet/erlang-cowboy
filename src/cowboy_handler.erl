@@ -31,6 +31,8 @@
 -callback terminate(any(), map(), any()) -> ok.
 -optional_callbacks([terminate/3]).
 
+-include("cowboy.hrl").
+
 -spec execute(Req, Env) -> {ok, Req, Env}
 	when Req::cowboy_req:req(), Env::cowboy_middleware:env().
 execute(Req, Env=#{handler := Handler, handler_opts := HandlerOpts}) ->
@@ -42,9 +44,9 @@ execute(Req, Env=#{handler := Handler, handler_opts := HandlerOpts}) ->
 			Mod:upgrade(Req2, Env, Handler, State);
 		{Mod, Req2, State, Opts} ->
 			Mod:upgrade(Req2, Env, Handler, State, Opts)
-	catch Class:Reason:Stacktrace ->
+	catch ?CATCH(Class, Reason, _Stacktrace) ->
 		terminate({crash, Class, Reason}, Req, HandlerOpts, Handler),
-		erlang:raise(Class, Reason, Stacktrace)
+		erlang:raise(Class, Reason, ?STACK(_Stacktrace))
 	end.
 
 -spec terminate(any(), Req | undefined, any(), module()) -> ok when Req::cowboy_req:req().
