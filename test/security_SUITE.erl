@@ -48,10 +48,12 @@ groups() ->
 		{https, [parallel], Tests ++ H1Tests},
 		{h2, [parallel], Tests},
 		{h2c, [parallel], Tests ++ H2CTests},
+		{h3, [], Tests},
 		{http_compress, [parallel], Tests ++ H1Tests},
 		{https_compress, [parallel], Tests ++ H1Tests},
 		{h2_compress, [parallel], Tests},
-		{h2c_compress, [parallel], Tests ++ H2CTests}
+		{h2c_compress, [parallel], Tests ++ H2CTests},
+		{h3_compress, [], Tests}
 	].
 
 init_per_suite(Config) ->
@@ -65,7 +67,7 @@ init_per_group(Name, Config) ->
 	cowboy_test:init_common_groups(Name, Config, ?MODULE).
 
 end_per_group(Name, _) ->
-	cowboy:stop_listener(Name).
+	cowboy_test:stop_group(Name).
 
 %% Routes.
 

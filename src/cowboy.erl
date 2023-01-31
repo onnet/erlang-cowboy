@@ -16,6 +16,8 @@
 
 -export([start_clear/3]).
 -export([start_tls/3]).
+-export([start_quic/2]).
+-export([start_quic_test/0]).
 -export([stop_listener/1]).
 -export([get_env/2]).
 -export([get_env/3]).
@@ -61,6 +63,91 @@ start_tls(Ref, TransOpts0, ProtoOpts0) ->
 	{TransOpts, ConnectionType} = ensure_connection_type(TransOpts2),
 	ProtoOpts = ProtoOpts0#{connection_type => ConnectionType},
 	ranch:start_listener(Ref, ranch_ssl, TransOpts, cowboy_tls, ProtoOpts).
+
+%% @todo Experimental function to start a barebone QUIC listener.
+%%       This will need to be reworked to be closer to Ranch
+%%       listeners and provide equivalent features.
+-spec start_quic(_, _) -> todo.
+start_quic(TransOpts, ProtoOpts) ->
+	{ok, _} = application:ensure_all_started(quicer),
+	Parent = self(),
+	SocketOpts0 = maps:get(socket_opts, TransOpts, []),
+	{Port, SocketOpts2} = case lists:keytake(port, 1, SocketOpts0) of
+		{value, {port, Port0}, SocketOpts1} ->
+			{Port0, SocketOpts1};
+		false ->
+			{port_0(), SocketOpts0}
+	end,
+	SocketOpts = [
+		{alpn, ["h3"]}, %% @todo Why not binary?
+		{peer_unidi_stream_count, 3}, %% We only need control and QPACK enc/dec.
+		{peer_bidi_stream_count, 100}
+	|SocketOpts2],
+	_ListenerPid = spawn(fun() ->
+		{ok, Listener} = quicer:listen(Port, SocketOpts),
+		Parent ! {ok, Listener},
+		ct:pal("listen ~p", [Listener]),
+		_AcceptorPid = [spawn(fun AcceptLoop() ->
+			{ok, Conn} = quicer:accept(Listener, []),
+%			ct:pal("accept ~p", [Conn]),
+			Pid = spawn(fun() ->
+				receive go -> ok end,
+				%% We have to do the handshake after handing control of
+				%% the connection otherwise streams may come in before
+				%% the controlling process is changed and messages will
+				%% not be sent to the correct process.
+				{ok, Conn} = quicer:handshake(Conn),
+%				ct:pal("handshake ~p", [Conn]),
+				process_flag(trap_exit, true), %% @todo Only if supervisor though.
+				try cowboy_http3:init(Parent, Conn, ProtoOpts)
+				catch
+					exit:{shutdown,_} -> ok;
+					C:E:S -> ct:pal("CRASH ~p:~p:~p", [C,E,S])
+				end
+			end),
+			ok = quicer:controlling_process(Conn, Pid),
+			Pid ! go,
+			AcceptLoop()
+		end) || _ <- lists:seq(1, 20)],
+		%% Listener process must not terminate.
+		receive after infinity -> ok end
+	end),
+	receive
+		{ok, Listener} ->
+			{ok, Listener}
+	end.
+
+%% Select a random UDP port using gen_udp because quicer
+%% does not provide equivalent functionality. Taken from
+%% quicer test suites.
+port_0() ->
+	{ok, Socket} = gen_udp:open(0, [{reuseaddr, true}]),
+	{ok, {_, Port}} = inet:sockname(Socket),
+	gen_udp:close(Socket),
+	case os:type() of
+		{unix, darwin} ->
+			%% Apparently macOS doesn't free the port immediately.
+			timer:sleep(500);
+		_ ->
+			ok
+	end,
+	ct:pal("port_0: ~p", [Port]),
+	Port.
+
+-spec start_quic_test() -> ok.
+start_quic_test() ->
+	start_quic(#{
+		socket_opts => [
+			{cert, "deps/quicer/test/quicer_SUITE_data/cert.pem"},
+			{key, "deps/quicer/test/quicer_SUITE_data/key.pem"}
+		]
+	}, #{
+		env => #{dispatch => cowboy_router:compile([
+			{"localhost", [
+				{"/", quic_hello_h, []}
+			]}
+		])}
+	}).
 
 ensure_connection_type(TransOpts=#{connection_type := ConnectionType}) ->
 	{TransOpts, ConnectionType};

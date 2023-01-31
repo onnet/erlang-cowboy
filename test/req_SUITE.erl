@@ -46,7 +46,7 @@ init_per_group(Name, Config) ->
 	cowboy_test:init_common_groups(Name, Config, ?MODULE).
 
 end_per_group(Name, _) ->
-	cowboy:stop_listener(Name).
+	cowboy_test:stop_group(Name).
 
 %% Routes.
 
@@ -107,13 +107,17 @@ do_get(Path, Config) ->
 do_get(Path, Headers, Config) ->
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, Path, [{<<"accept-encoding">>, <<"gzip">>}|Headers]),
-	{response, IsFin, Status, RespHeaders} = gun:await(ConnPid, Ref, infinity),
-	{ok, RespBody} = case IsFin of
-		nofin -> gun:await_body(ConnPid, Ref, infinity);
-		fin -> {ok, <<>>}
-	end,
-	gun:close(ConnPid),
-	{Status, RespHeaders, do_decode(RespHeaders, RespBody)}.
+	case gun:await(ConnPid, Ref, infinity) of
+		{response, IsFin, Status, RespHeaders} ->
+			{ok, RespBody} = case IsFin of
+				nofin -> gun:await_body(ConnPid, Ref, infinity);
+				fin -> {ok, <<>>}
+			end,
+			gun:close(ConnPid),
+			{Status, RespHeaders, do_decode(RespHeaders, RespBody)};
+		{error, {stream_error, Error}} ->
+			Error
+	end.
 
 do_get_body(Path, Config) ->
 	do_get_body(Path, [], Config).
@@ -142,7 +146,9 @@ do_get_inform(Path, Config) ->
 				fin -> {ok, <<>>}
 			end,
 			gun:close(ConnPid),
-			{InfoStatus, InfoHeaders, RespStatus, RespHeaders, do_decode(RespHeaders, RespBody)}
+			{InfoStatus, InfoHeaders, RespStatus, RespHeaders, do_decode(RespHeaders, RespBody)};
+		{error, {stream_error, Error}} ->
+			Error
 	end.
 
 do_decode(Headers, Body) ->
@@ -184,7 +190,8 @@ bindings(Config) ->
 cert(Config) ->
 	case config(type, Config) of
 		tcp -> doc("TLS certificates can only be provided over TLS.");
-		ssl -> do_cert(Config)
+		ssl -> do_cert(Config);
+		quic -> {skip, "Implement using quicer:peercert/1."}
 	end.
 
 do_cert(Config) ->
@@ -386,7 +393,8 @@ port(Config) ->
 	Port = do_get_body("/direct/port", Config),
 	ExpectedPort = case config(type, Config) of
 		tcp -> <<"80">>;
-		ssl -> <<"443">>
+		ssl -> <<"443">>;
+		quic -> <<"443">>
 	end,
 	ExpectedPort = do_get_body("/port", [{<<"host">>, <<"localhost">>}], Config),
 	ExpectedPort = do_get_body("/direct/port", [{<<"host">>, <<"localhost">>}], Config),
@@ -412,7 +420,8 @@ do_scheme(Path, Config) ->
 	Transport = config(type, Config),
 	case do_get_body(Path, Config) of
 		<<"http">> when Transport =:= tcp -> ok;
-		<<"https">> when Transport =:= ssl -> ok
+		<<"https">> when Transport =:= ssl -> ok;
+		<<"https">> when Transport =:= quic -> ok
 	end.
 
 sock(Config) ->
@@ -425,7 +434,8 @@ uri(Config) ->
 	doc("Request URI building/modification."),
 	Scheme = case config(type, Config) of
 		tcp -> <<"http">>;
-		ssl -> <<"https">>
+		ssl -> <<"https">>;
+		quic -> <<"https">>
 	end,
 	SLen = byte_size(Scheme),
 	Port = integer_to_binary(config(port, Config)),
@@ -459,7 +469,8 @@ do_version(Path, Config) ->
 	Protocol = config(protocol, Config),
 	case do_get_body(Path, Config) of
 		<<"HTTP/1.1">> when Protocol =:= http -> ok;
-		<<"HTTP/2">> when Protocol =:= http2 -> ok
+		<<"HTTP/2">> when Protocol =:= http2 -> ok;
+		<<"HTTP/3">> when Protocol =:= http3 -> ok
 	end.
 
 %% Tests: Request body.
@@ -626,6 +637,8 @@ do_read_urlencoded_body_too_long(Path, Body, Config) ->
 			%% 408 error responses should close HTTP/1.1 connections.
 			{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, RespHeaders);
 		http2 ->
+			ok;
+		http3 ->
 			ok
 	end,
 	gun:close(ConnPid).
@@ -895,11 +908,23 @@ delete_resp_header(Config) ->
 	false = lists:keymember(<<"content-type">>, 1, Headers),
 	ok.
 
+%% Data may be lost due to how RESET_STREAM QUIC frame works.
+%% Because there is ongoing work for a better way to reset streams
+%% (https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-03.html)
+%% we convert the error to a 500 to keep the tests more explicit
+%% at what we expect.
+%% @todo When RESET_STREAM_AT gets added we can remove this function.
+do_maybe_h3_error2({stream_error, h3_internal_error, _}) -> {500, []};
+do_maybe_h3_error2(Result) -> Result.
+
+do_maybe_h3_error3({stream_error, h3_internal_error, _}) -> {500, [], <<>>};
+do_maybe_h3_error3(Result) -> Result.
+
 inform2(Config) ->
 	doc("Informational response(s) without headers, followed by the real response."),
 	{102, [], 200, _, _} = do_get_inform("/resp/inform2/102", Config),
 	{102, [], 200, _, _} = do_get_inform("/resp/inform2/binary", Config),
-	{500, _} = do_get_inform("/resp/inform2/error", Config),
+	{500, _} = do_maybe_h3_error2(do_get_inform("/resp/inform2/error", Config)),
 	{102, [], 200, _, _} = do_get_inform("/resp/inform2/twice", Config),
 	%% @todo How to test this properly? This isn't enough.
 	{200, _} = do_get_inform("/resp/inform2/after_reply", Config),
@@ -910,9 +935,9 @@ inform3(Config) ->
 	Headers = [{<<"ext-header">>, <<"ext-value">>}],
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/102", Config),
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/binary", Config),
-	{500, _} = do_get_inform("/resp/inform3/error", Config),
+	{500, _} = do_maybe_h3_error2(do_get_inform("/resp/inform3/error", Config)),
 	%% The set-cookie header is special. set_resp_cookie must be used.
-	{500, _} = do_get_inform("/resp/inform3/set_cookie", Config),
+	{500, _} = do_maybe_h3_error2(do_get_inform("/resp/inform3/set_cookie", Config)),
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/twice", Config),
 	%% @todo How to test this properly? This isn't enough.
 	{200, _} = do_get_inform("/resp/inform3/after_reply", Config),
@@ -924,7 +949,7 @@ reply2(Config) ->
 	{201, _, _} = do_get("/resp/reply2/201", Config),
 	{404, _, _} = do_get("/resp/reply2/404", Config),
 	{200, _, _} = do_get("/resp/reply2/binary", Config),
-	{500, _, _} = do_get("/resp/reply2/error", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/reply2/error", Config)),
 	%% @todo How to test this properly? This isn't enough.
 	{200, _, _} = do_get("/resp/reply2/twice", Config),
 	ok.
@@ -937,9 +962,9 @@ reply3(Config) ->
 	true = lists:keymember(<<"content-type">>, 1, Headers2),
 	{404, Headers3, _} = do_get("/resp/reply3/404", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers3),
-	{500, _, _} = do_get("/resp/reply3/error", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/reply3/error", Config)),
 	%% The set-cookie header is special. set_resp_cookie must be used.
-	{500, _, _} = do_get("/resp/reply3/set_cookie", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/reply3/set_cookie", Config)),
 	ok.
 
 reply4(Config) ->
@@ -947,9 +972,9 @@ reply4(Config) ->
 	{200, _, <<"OK">>} = do_get("/resp/reply4/200", Config),
 	{201, _, <<"OK">>} = do_get("/resp/reply4/201", Config),
 	{404, _, <<"OK">>} = do_get("/resp/reply4/404", Config),
-	{500, _, _} = do_get("/resp/reply4/error", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/reply4/error", Config)),
 	%% The set-cookie header is special. set_resp_cookie must be used.
-	{500, _, _} = do_get("/resp/reply4/set_cookie", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/reply4/set_cookie", Config)),
 	ok.
 
 stream_reply2(Config) ->
@@ -959,7 +984,7 @@ stream_reply2(Config) ->
 	{201, _, Body} = do_get("/resp/stream_reply2/201", Config),
 	{404, _, Body} = do_get("/resp/stream_reply2/404", Config),
 	{200, _, Body} = do_get("/resp/stream_reply2/binary", Config),
-	{500, _, _} = do_get("/resp/stream_reply2/error", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/stream_reply2/error", Config)),
 	ok.
 
 stream_reply2_twice(Config) ->
@@ -998,9 +1023,9 @@ stream_reply3(Config) ->
 	true = lists:keymember(<<"content-type">>, 1, Headers2),
 	{404, Headers3, Body} = do_get("/resp/stream_reply3/404", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers3),
-	{500, _, _} = do_get("/resp/stream_reply3/error", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/stream_reply3/error", Config)),
 	%% The set-cookie header is special. set_resp_cookie must be used.
-	{500, _, _} = do_get("/resp/stream_reply3/set_cookie", Config),
+	{500, _, _} = do_maybe_h3_error3(do_get("/resp/stream_reply3/set_cookie", Config)),
 	ok.
 
 stream_body_fin0(Config) ->
@@ -1084,8 +1109,11 @@ stream_body_content_length_nofin_error(Config) ->
 					end
 			end;
 		http2 ->
-			%% @todo HTTP2 should have the same content-length checks
-			ok
+			%% @todo HTTP/2 should have the same content-length checks.
+			{skip, "Implement the test for HTTP/2."};
+		http3 ->
+			%% @todo HTTP/3 should have the same content-length checks.
+			{skip, "Implement the test for HTTP/3."}
 	end.
 
 stream_body_concurrent(Config) ->
@@ -1224,7 +1252,8 @@ do_trailers(Path, Config) ->
 push(Config) ->
 	case config(protocol, Config) of
 		http -> do_push_http("/resp/push", Config);
-		http2 -> do_push_http2(Config)
+		http2 -> do_push_http2(Config);
+		http3 -> {skip, "Implement server push for HTTP/3."}
 	end.
 
 push_after_reply(Config) ->
@@ -1238,20 +1267,23 @@ push_after_reply(Config) ->
 push_method(Config) ->
 	case config(protocol, Config) of
 		http -> do_push_http("/resp/push/method", Config);
-		http2 -> do_push_http2_method(Config)
+		http2 -> do_push_http2_method(Config);
+		http3 -> {skip, "Implement server push for HTTP/3."}
 	end.
 
 
 push_origin(Config) ->
 	case config(protocol, Config) of
 		http -> do_push_http("/resp/push/origin", Config);
-		http2 -> do_push_http2_origin(Config)
+		http2 -> do_push_http2_origin(Config);
+		http3 -> {skip, "Implement server push for HTTP/3."}
 	end.
 
 push_qs(Config) ->
 	case config(protocol, Config) of
 		http -> do_push_http("/resp/push/qs", Config);
-		http2 -> do_push_http2_qs(Config)
+		http2 -> do_push_http2_qs(Config);
+		http3 -> {skip, "Implement server push for HTTP/3."}
 	end.
 
 do_push_http(Path, Config) ->
