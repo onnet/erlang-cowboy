@@ -82,7 +82,7 @@ send(_Conn, StreamID, Data, IsFin) ->
 	StreamRef = get({quicer_stream, StreamID}),
 	Size = iolist_size(Data),
 	case quicer:send(StreamRef, Data, send_flag(IsFin)) of
-		{ok, _} -> ok;
+		{ok, Size} -> ok;
 		Error -> Error
 	end.
 
@@ -93,7 +93,7 @@ send_flag(fin) -> ?QUIC_SEND_FLAG_FIN.
 
 shutdown_stream(_Conn, StreamID, Dir, ErrorCode) ->
 	StreamRef = get({quicer_stream, StreamID}),
-	Res = quicer:shutdown_stream(StreamRef, shutdown_flag(Dir), ErrorCode, infinity),
+	quicer:shutdown_stream(StreamRef, shutdown_flag(Dir), ErrorCode, infinity),
 %	ct:pal("~p shutdown_stream res ~p", [self(), Res]),
 	ok.
 
@@ -133,7 +133,7 @@ handle({quic, closed, Conn, _Flags}) ->
 %% The following events are currently ignored either because
 %% I do not know what they do or because we do not need to
 %% take action.
-handle({quic, streams_available, _Conn, Props}) ->
+handle({quic, streams_available, _Conn, _Props}) ->
 	ok;
 handle({quic, dgram_state_changed, _Conn, _Props}) ->
 	ok;

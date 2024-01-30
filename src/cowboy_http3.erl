@@ -691,7 +691,7 @@ reset_stream(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 	end,
 	%% @todo Do we want to close both sides?
 	%% @todo Should we close the send side if the receive side was already closed?
-	Res = cowboy_quicer:shutdown_stream(Conn, StreamID,
+	cowboy_quicer:shutdown_stream(Conn, StreamID,
 		both, cow_http3:error_to_code(Reason)),
 %	ct:pal("~p reset_stream res ~p", [self(), Res]),
 	State1 = case cow_http3_machine:reset_stream(StreamID, HTTP3Machine0) of
