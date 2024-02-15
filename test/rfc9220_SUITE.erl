@@ -78,7 +78,7 @@ reject_handshake_when_disabled(Config0) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -114,7 +114,7 @@ reject_handshake_disabled_by_default(Config0) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -141,7 +141,7 @@ accept_uppercase_pseudo_header_protocol(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -156,7 +156,7 @@ accept_uppercase_pseudo_header_protocol(Config) ->
 		EncodedResponse:HLen/bytes
 	>> = Data,
 	{ok, DecodedResponse, _DecData, _DecSt}
-		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init()),
+		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init(decoder)),
 	#{<<":status">> := <<"200">>} = maps:from_list(DecodedResponse),
 	ok.
 
@@ -178,7 +178,7 @@ reject_many_pseudo_header_protocol(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -205,7 +205,7 @@ reject_unknown_pseudo_header_protocol(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -232,7 +232,7 @@ reject_invalid_pseudo_header_protocol(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -258,7 +258,7 @@ reject_missing_pseudo_header_scheme(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -284,7 +284,7 @@ reject_missing_pseudo_header_path(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -316,7 +316,7 @@ reject_missing_pseudo_header_authority(Config) ->
 		{<<":path">>, <<"/ws">>},
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -344,7 +344,7 @@ reject_missing_pseudo_header_protocol(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -376,7 +376,7 @@ reject_connection_header(Config) ->
 		{<<"connection">>, <<"upgrade">>},
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -404,7 +404,7 @@ reject_upgrade_header(Config) ->
 		{<<"upgrade">>, <<"websocket">>},
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -439,7 +439,7 @@ accept_handshake_when_enabled(Config) ->
 		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
 		{<<"sec-websocket-version">>, <<"13">>},
 		{<<"origin">>, <<"http://localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -454,7 +454,7 @@ accept_handshake_when_enabled(Config) ->
 		EncodedResponse:HLen/bytes
 	>> = Data,
 	{ok, DecodedResponse, _DecData, _DecSt}
-		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init()),
+		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init(decoder)),
 	#{<<":status">> := <<"200">>} = maps:from_list(DecodedResponse),
 	%% Masked text hello echoed back clear by the server.
 	Mask = 16#37fa213d,

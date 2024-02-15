@@ -77,6 +77,10 @@ init(Parent, Conn, Opts) ->
 %ct:pal("init"),
 	{ok, SettingsBin, HTTP3Machine0} = cow_http3_machine:init(server, Opts),
 	%% Immediately open a control, encoder and decoder stream.
+
+%% @todo An endpoint MAY avoid creating an encoder stream if it will not be used (for example, if its encoder does not wish to use the dynamic table or if the maximum size of the dynamic table permitted by the peer is zero).
+%% @todo An endpoint MAY avoid creating a decoder stream if its decoder sets the maximum capacity of the dynamic table to zero.
+
 	{ok, ControlID} = cowboy_quicer:start_unidi_stream(Conn, [<<0>>, SettingsBin]),
 	{ok, EncoderID} = cowboy_quicer:start_unidi_stream(Conn, <<2>>),
 	{ok, DecoderID} = cowboy_quicer:start_unidi_stream(Conn, <<3>>),
@@ -252,11 +256,10 @@ frame(State=#state{http3_machine=HTTP3Machine0, conn=Conn, local_decoder_id=Deco
 			State#state{http3_machine=HTTP3Machine};
 		{ok, {data, Data}, HTTP3Machine} ->
 			data_frame(State#state{http3_machine=HTTP3Machine}, Stream, IsFin, Data);
-		%% @todo I don't think we need the IsFin in the {headers tuple.
-		{ok, {headers, IsFin, Headers, PseudoHeaders, BodyLen}, HTTP3Machine} ->
+		{ok, {headers, Headers, PseudoHeaders, BodyLen}, HTTP3Machine} ->
 			headers_frame(State#state{http3_machine=HTTP3Machine},
 				Stream, IsFin, Headers, PseudoHeaders, BodyLen);
-		{ok, {headers, IsFin, Headers, PseudoHeaders, BodyLen}, DecData, HTTP3Machine} ->
+		{ok, {headers, Headers, PseudoHeaders, BodyLen}, DecData, HTTP3Machine} ->
 			%% Send the decoder data.
 			ok = cowboy_quicer:send(Conn, DecoderID, DecData),
 			headers_frame(State#state{http3_machine=HTTP3Machine},

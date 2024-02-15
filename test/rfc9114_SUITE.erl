@@ -91,7 +91,7 @@ req_stream(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedRequest)),
@@ -107,7 +107,7 @@ req_stream(Config) ->
 		Rest/bits
 	>> = Data,
 	{ok, DecodedResponse, _DecData, _DecSt}
-		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init()),
+		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init(decoder)),
 	#{
 		<<":status">> := <<"200">>,
 		<<"content-length">> := BodyLen
@@ -142,7 +142,7 @@ req_stream_two_requests(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedRequest2, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<":method">>, <<"GET">>},
 		{<<":scheme">>, <<"https">>},
@@ -172,7 +172,7 @@ headers_then_trailers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -201,7 +201,7 @@ headers_then_data_then_trailers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -233,7 +233,7 @@ data_then_headers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<0>>, %% DATA frame.
 		cow_http3:encode_int(13),
@@ -255,9 +255,8 @@ headers_then_trailers_then_data(Config) ->
 		{<<":method">>, <<"GET">>},
 		{<<":scheme">>, <<"https">>},
 		{<<":authority">>, <<"localhost">>},
-		{<<":path">>, <<"/">>},
-		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+		{<<":path">>, <<"/">>}
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -287,7 +286,7 @@ headers_then_data_then_trailers_then_data(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -320,7 +319,7 @@ headers_then_data_then_trailers_then_trailers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers1, _EncData2, EncSt1} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -360,7 +359,7 @@ unknown_then_headers(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		cow_http3:encode_int(Type), %% Unknown frame.
 		cow_http3:encode_int(iolist_size(Bytes)),
@@ -390,7 +389,7 @@ headers_then_unknown(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -420,7 +419,7 @@ headers_then_data_then_unknown(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -451,9 +450,8 @@ headers_then_trailers_then_unknown(Config, Type, Bytes) ->
 		{<<":method">>, <<"GET">>},
 		{<<":scheme">>, <<"https">>},
 		{<<":authority">>, <<"localhost">>},
-		{<<":path">>, <<"/">>},
-		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+		{<<":path">>, <<"/">>}
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -490,7 +488,7 @@ headers_then_data_then_unknown_then_trailers(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -530,7 +528,7 @@ headers_then_data_then_unknown_then_data(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -567,7 +565,7 @@ headers_then_data_then_trailers_then_unknown(Config, Type, Bytes) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -665,7 +663,7 @@ reject_transfer_encoding_header_with_body(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"transfer-encoding">>, <<"chunked">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -827,7 +825,7 @@ accept_te_header_value_trailers(Config) ->
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>},
 		{<<"te">>, <<"trailers">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"content-type">>, <<"text/plain">>}
 	], 0, EncSt0),
@@ -905,7 +903,7 @@ reject_pseudo_headers_in_trailers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"trailer">>, <<"x-checksum">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, EncodedTrailers, _EncData2, _EncSt} = cow_qpack:encode_field_section([
 		{<<"x-checksum">>, <<"md5:4cc909a007407f3706399b6496babec3">>},
 		{<<":path">>, <<"/">>}
@@ -1020,7 +1018,7 @@ accept_host_header_on_missing_pseudo_header_authority(Config) ->
 		{<<":scheme">>, <<"https">>},
 		{<<":path">>, <<"/">>},
 		{<<"host">>, <<"localhost">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -1083,7 +1081,7 @@ do_reject_malformed_headers(Config, Headers) ->
 	#{conn := Conn} = do_connect(Config),
 	{ok, StreamRef} = quicer:start_stream(Conn, #{}),
 	{ok, EncodedHeaders, _EncData1, _EncSt0}
-		= cow_qpack:encode_field_section(Headers, 0, cow_qpack:init()),
+		= cow_qpack:encode_field_section(Headers, 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -1350,7 +1348,7 @@ control_reject_first_frame_headers(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(ControlRef, [
 		<<0>>, %% CONTROL stream.
 		<<1>>, %% HEADERS frame.
@@ -1411,7 +1409,7 @@ control_reject_first_frame_push_promise(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 
 	{ok, _} = quicer:send(ControlRef, [
 		<<0>>, %% CONTROL stream.
@@ -1548,7 +1546,7 @@ data_frame_can_span_multiple_packets(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/echo/read_body">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -1577,7 +1575,7 @@ headers_frame_can_span_multiple_packets(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	Half = iolist_size(EncodedHeaders) div 2,
 	<<EncodedHeadersPart1:Half/binary, EncodedHeadersPart2/bits>>
 		= iolist_to_binary(EncodedHeaders),
@@ -1738,7 +1736,7 @@ data_frame_truncated(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/echo/read_body">>},
 		{<<"content-length">>, <<"13">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders)),
@@ -1762,7 +1760,7 @@ headers_frame_truncated(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		<<1>>, %% HEADERS frame.
 		cow_http3:encode_int(iolist_size(EncodedHeaders))
@@ -1850,7 +1848,7 @@ headers_frame_rejected_on_control_stream(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(ControlRef, [
 		<<0>>, %% CONTROL stream.
 		SettingsBin,
@@ -1892,7 +1890,7 @@ settings_on_bidi_stream(Config) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	{ok, _} = quicer:send(StreamRef, [
 		SettingsBin,
 		<<1>>, %% HEADERS frame.
@@ -2148,7 +2146,7 @@ do_reserved_reject_http2_bidi(Config, Type) ->
 		{<<":authority">>, <<"localhost">>},
 		{<<":path">>, <<"/">>},
 		{<<"content-length">>, <<"0">>}
-	], 0, cow_qpack:init()),
+	], 0, cow_qpack:init(encoder)),
 	Len = rand:uniform(512),
 	{ok, _} = quicer:send(StreamRef, [
 		cow_http3:encode_int(Type),
@@ -2339,7 +2337,7 @@ do_receive_response(StreamRef) ->
 		Rest/bits
 	>> = Data,
 	{ok, DecodedResponse, _DecData, _DecSt}
-		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init()),
+		= cow_qpack:decode_field_section(EncodedResponse, 0, cow_qpack:init(decoder)),
 	Headers = maps:from_list(DecodedResponse),
 	#{<<"content-length">> := BodyLen} = Headers,
 	{DLenEnc, DLenBits} = do_guess_int_encoding(Rest),
