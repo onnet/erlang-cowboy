@@ -17,7 +17,6 @@
 -export([start_clear/3]).
 -export([start_tls/3]).
 -export([start_quic/2]).
--export([start_quic_test/0]).
 -export([stop_listener/1]).
 -export([get_env/2]).
 -export([get_env/3]).
@@ -133,21 +132,6 @@ port_0() ->
 	end,
 	ct:pal("port_0: ~p", [Port]),
 	Port.
-
--spec start_quic_test() -> ok.
-start_quic_test() ->
-	start_quic(#{
-		socket_opts => [
-			{cert, "deps/quicer/test/quicer_SUITE_data/cert.pem"},
-			{key, "deps/quicer/test/quicer_SUITE_data/key.pem"}
-		]
-	}, #{
-		env => #{dispatch => cowboy_router:compile([
-			{"localhost", [
-				{"/", quic_hello_h, []}
-			]}
-		])}
-	}).
 
 ensure_connection_type(TransOpts=#{connection_type := ConnectionType}) ->
 	{TransOpts, ConnectionType};
