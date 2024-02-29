@@ -1,4 +1,4 @@
-%% Copyright (c) 2023, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2023-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -174,6 +174,7 @@ parse1(State, Data, Stream=#stream{status=header}, IsFin) ->
 	parse_unidirectional_stream_header(State, Data, Stream, IsFin);
 parse1(State, Data, Stream=#stream{status={data, Len}, id=StreamID}, IsFin) ->
 	DataLen = byte_size(Data),
+	%% @todo We should probably error out, not crash, on frame truncation.
 	if
 		DataLen < Len ->
 			%% We don't have the full frame but this is the end of the
@@ -185,19 +186,54 @@ parse1(State, Data, Stream=#stream{status={data, Len}, id=StreamID}, IsFin) ->
 			parse(frame(State, Stream#stream{status=normal}, {data, Data1}, FrameIsFin),
 				Rest, StreamID, IsFin)
 	end;
+parse1(State, Data, Stream=#stream{status={ignore, Len}, id=StreamID}, IsFin) ->
+	DataLen = byte_size(Data),
+	%% @todo We should probably error out, not crash, on frame truncation.
+	if
+		DataLen < Len ->
+			loop(stream_store(State, Stream#stream{status={ignore, Len - DataLen}}));
+		true ->
+			<<_:Len/binary, Rest/bits>> = Data,
+			parse(stream_store(State, Stream#stream{status=normal}),
+				Rest, StreamID, IsFin)
+	end;
 %% @todo Clause that discards receiving data for stopping streams.
 %%       We may receive a few more frames after we abort receiving.
-parse1(State, Data, Stream=#stream{id=StreamID}, IsFin) ->
+parse1(State=#state{opts=Opts}, Data, Stream=#stream{id=StreamID}, IsFin) ->
 	case cow_http3:parse(Data) of
 		{ok, Frame, Rest} ->
 			FrameIsFin = is_fin(IsFin, Rest),
 %			ct:pal("parse1 Frame= ~p Rest= ~p", [Frame, Rest]),
 			parse(frame(State, Stream, Frame, FrameIsFin), Rest, StreamID, IsFin);
-		{more, Frame, Len} ->
+		{more, Frame = {data, _}, Len} ->
 			%% We're at the end of the data so FrameIsFin is equivalent to IsFin.
 			case IsFin of
 				nofin ->
+					%% The stream will be stored at the end of processing commands.
 					loop(frame(State, Stream#stream{status={data, Len}}, Frame, nofin));
+				fin ->
+					terminate(State, {connection_error, h3_frame_error,
+						'Last frame on stream was truncated. (RFC9114 7.1)'})
+			end;
+		{more, ignore, Len} ->
+			%% @todo This setting should be tested.
+			%%
+			%% While the default value doesn't warrant doing a streaming ignore
+			%% (and could work just fine with the 'more' clause), this value
+			%% is configurable and users may want to set it large.
+			MaxIgnoredLen = maps:get(max_ignored_frame_size_received, Opts, 16384),
+			%% We're at the end of the data so FrameIsFin is equivalent to IsFin.
+			case IsFin of
+				nofin when Len < MaxIgnoredLen ->
+					%% We are not processing commands so we must store the stream.
+					%% We also call ignored_frame here; we will not need to call
+					%% it again when ignoring the rest of the data.
+					Stream1 = Stream#stream{status={ignore, Len}},
+					State1 = ignored_frame(State, Stream1),
+					loop(stream_store(State1, Stream1));
+				nofin ->
+					terminate(State, {connection_error, h3_excessive_load,
+						'Ignored frame larger than limit. (RFC9114 10.5)'});
 				fin ->
 					terminate(State, {connection_error, h3_frame_error,
 						'Last frame on stream was truncated. (RFC9114 7.1)'})
@@ -207,7 +243,8 @@ parse1(State, Data, Stream=#stream{id=StreamID}, IsFin) ->
 		Error = {connection_error, _, _} ->
 			terminate(State, Error);
 		more when Data =:= <<>> ->
-			loop(stream_store(State, Stream#stream{buffer=Data}));
+			%% The buffer was already reset to <<>>.
+			loop(stream_store(State, Stream));
 		more ->
 			%% We're at the end of the data so FrameIsFin is equivalent to IsFin.
 			case IsFin of
@@ -488,7 +525,7 @@ commands(State, Stream, []) ->
 %% Error responses are sent only if a response wasn't sent already.
 commands(State=#state{http3_machine=HTTP3Machine}, Stream=#stream{id=StreamID},
 		[{error_response, StatusCode, Headers, Body}|Tail]) ->
-	case cow_http3_machine:get_stream_local_state(StreamID, HTTP3Machine) of
+	case cow_http3_machine:get_bidi_stream_local_state(StreamID, HTTP3Machine) of
 		{ok, idle} ->
 			commands(State, Stream, [{response, StatusCode, Headers, Body}|Tail]);
 		_ ->
@@ -718,7 +755,7 @@ stop_stream(State0=#state{http3_machine=HTTP3Machine}, Stream=#stream{id=StreamI
 	%% We abort reading when stopping the stream but only
 	%% if the client was not finished sending data.
 	%% We mark the stream as 'stopping' either way.
-	State = case cow_http3_machine:get_stream_remote_state(StreamID, HTTP3Machine) of
+	State = case cow_http3_machine:get_bidi_stream_remote_state(StreamID, HTTP3Machine) of
 		{ok, fin} ->
 			stream_store(State0, Stream#stream{status=stopping});
 		{error, not_found} ->
@@ -728,7 +765,7 @@ stop_stream(State0=#state{http3_machine=HTTP3Machine}, Stream=#stream{id=StreamI
 	end,
 	%% Then we may need to send a response or terminate it
 	%% if the stream handler did not do so already.
-	case cow_http3_machine:get_stream_local_state(StreamID, HTTP3Machine) of
+	case cow_http3_machine:get_bidi_stream_local_state(StreamID, HTTP3Machine) of
 		%% When the stream terminates normally (without resetting the stream)
 		%% and no response was sent, we need to send a proper response back to the client.
 		{ok, idle} ->

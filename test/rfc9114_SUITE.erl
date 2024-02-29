@@ -1,4 +1,4 @@
-%% Copyright (c) 2023, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2023-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -1476,45 +1476,53 @@ control_reject_first_frame_reserved(Config) ->
 
 control_reject_multiple(Config) ->
 	doc("Endpoints must not create multiple control streams. (RFC9114 6.2.1)"),
-	#{conn := Conn} = do_connect(Config),
-	%% Create two control streams.
 	{ok, SettingsBin, _HTTP3Machine0} = cow_http3_machine:init(client, #{}),
-	{ok, ControlRef1} = quicer:start_stream(Conn,
+	do_critical_reject_multiple(Config, [<<0>>, SettingsBin]).
+
+do_critical_reject_multiple(Config, HeaderData) ->
+	#{conn := Conn} = do_connect(Config),
+	%% Create two critical streams.
+	{ok, StreamRef1} = quicer:start_stream(Conn,
 		#{open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}),
-	{ok, _} = quicer:send(ControlRef1, [<<0>>, SettingsBin]),
-	{ok, ControlRef2} = quicer:start_stream(Conn,
+	{ok, _} = quicer:send(StreamRef1, HeaderData),
+	{ok, StreamRef2} = quicer:start_stream(Conn,
 		#{open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}),
-	{ok, _} = quicer:send(ControlRef2, [<<0>>, SettingsBin]),
+	{ok, _} = quicer:send(StreamRef2, HeaderData),
 	%% The connection should have been closed.
 	#{reason := h3_stream_creation_error} = do_wait_connection_closed(Conn),
 	ok.
 
 control_local_closed_abort(Config) ->
 	doc("Endpoints must not close the control stream. (RFC9114 6.2.1)"),
-	#{conn := Conn} = do_connect(Config),
 	{ok, SettingsBin, _HTTP3Machine0} = cow_http3_machine:init(client, #{}),
-	{ok, ControlRef} = quicer:start_stream(Conn,
+	do_critical_local_closed_abort(Config, [<<0>>, SettingsBin]).
+
+do_critical_local_closed_abort(Config, HeaderData) ->
+	#{conn := Conn} = do_connect(Config),
+	{ok, StreamRef} = quicer:start_stream(Conn,
 		#{open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}),
-	{ok, _} = quicer:send(ControlRef, [<<0>>, SettingsBin]),
+	{ok, _} = quicer:send(StreamRef, HeaderData),
 	%% Wait a little to make sure the stream data was received before we abort.
 	timer:sleep(100),
-	%% Close the control stream.
-	quicer:async_shutdown_stream(ControlRef, ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0),
+	%% Close the critical stream.
+	quicer:async_shutdown_stream(StreamRef, ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0),
 	%% The connection should have been closed.
 	timer:sleep(1000),
-	ct:pal("~p", [process_info(self(), messages)]),
 	#{reason := h3_closed_critical_stream} = do_wait_connection_closed(Conn),
 	ok.
 
 control_local_closed_graceful(Config) ->
 	doc("Endpoints must not close the control stream. (RFC9114 6.2.1)"),
-	#{conn := Conn} = do_connect(Config),
 	{ok, SettingsBin, _HTTP3Machine0} = cow_http3_machine:init(client, #{}),
-	{ok, ControlRef} = quicer:start_stream(Conn,
+	do_critical_local_closed_graceful(Config, [<<0>>, SettingsBin]).
+
+do_critical_local_closed_graceful(Config, HeaderData) ->
+	#{conn := Conn} = do_connect(Config),
+	{ok, StreamRef} = quicer:start_stream(Conn,
 		#{open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}),
-	{ok, _} = quicer:send(ControlRef, [<<0>>, SettingsBin]),
-	%% Close the control stream.
-	quicer:async_shutdown_stream(ControlRef, ?QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0),
+	{ok, _} = quicer:send(StreamRef, HeaderData),
+	%% Close the critical stream.
+	quicer:async_shutdown_stream(StreamRef, ?QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0),
 	%% The connection should have been closed.
 	#{reason := h3_closed_critical_stream} = do_wait_connection_closed(Conn),
 	ok.
@@ -1671,6 +1679,39 @@ max_push_id_frame_can_span_multiple_packets(Config) ->
 	after 1000 ->
 		ok
 	end.
+
+unknown_frame_can_span_multiple_packets(Config) ->
+	doc("HTTP/3 frames can span multiple packets. (RFC9114 7)"),
+	#{conn := Conn} = do_connect(Config),
+	{ok, StreamRef} = quicer:start_stream(Conn, #{}),
+	{ok, _} = quicer:send(StreamRef, [
+		cow_http3:encode_int(do_unknown_frame_type()),
+		cow_http3:encode_int(16383)
+	]),
+	timer:sleep(100),
+	{ok, _} = quicer:send(StreamRef, rand:bytes(4096)),
+	timer:sleep(100),
+	{ok, _} = quicer:send(StreamRef, rand:bytes(4096)),
+	timer:sleep(100),
+	{ok, _} = quicer:send(StreamRef, rand:bytes(4096)),
+	timer:sleep(100),
+	{ok, _} = quicer:send(StreamRef, rand:bytes(4095)),
+	{ok, EncodedHeaders, _EncData, _EncSt} = cow_qpack:encode_field_section([
+		{<<":method">>, <<"GET">>},
+		{<<":scheme">>, <<"https">>},
+		{<<":authority">>, <<"localhost">>},
+		{<<":path">>, <<"/">>}
+	], 0, cow_qpack:init(encoder)),
+	{ok, _} = quicer:send(StreamRef, [
+		<<1>>, %% HEADERS frame.
+		cow_http3:encode_int(iolist_size(EncodedHeaders)),
+		EncodedHeaders
+	], ?QUIC_SEND_FLAG_FIN),
+	#{
+		headers := #{<<":status">> := <<"200">>},
+		body := <<"Hello world!">>
+	} = do_receive_response(StreamRef),
+	ok.
 
 %% The DATA and SETTINGS frames can be zero-length therefore
 %% they cannot be too short.
@@ -2201,6 +2242,18 @@ do_reserved_reject_http2_bidi(Config, Type) ->
 %% their use. An endpoint MAY treat activity that is suspicious as a connection
 %% error of type H3_EXCESSIVE_LOAD, but false positives will result in disrupting
 %% valid connections and requests.
+
+reject_large_unknown_frame(Config) ->
+	doc("Large unknown frames may risk denial-of-service "
+		"and should be rejected. (RFC9114 10.5)"),
+	#{conn := Conn} = do_connect(Config),
+	{ok, StreamRef} = quicer:start_stream(Conn, #{}),
+	{ok, _} = quicer:send(StreamRef, [
+		cow_http3:encode_int(do_unknown_frame_type()),
+		cow_http3:encode_int(16385)
+	]),
+	#{reason := h3_excessive_load} = do_wait_connection_closed(Conn),
+	ok.
 
 %% 10.5.1. Limits on Field Section Size
 %% An endpoint can use the SETTINGS_MAX_FIELD_SECTION_SIZE (Section 4.2.2)
