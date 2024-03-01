@@ -28,7 +28,8 @@
 	id :: non_neg_integer(), %% @todo specs
 
 	%% Whether the stream is currently in a special state.
-	status :: header | normal | {data, non_neg_integer()} | stopping,
+	status :: header | {unidi, control | encoder | decoder}
+		| normal | {data, non_neg_integer()} | stopping,
 
 	%% Stream buffer.
 	buffer = <<>> :: binary(),
@@ -51,10 +52,11 @@
 	%% HTTP/3 state machine.
 	http3_machine :: cow_http3_machine:http3_machine(),
 
-	%% Quick pointers for commonly used streams.
-	local_control_id :: any(), %% @todo specs Control stream must not be closed.
-	local_encoder_id :: any(), %% @todo specs
-	local_decoder_id :: any(), %% @todo specs
+	%% Specially handled local unidi streams.
+	%% @todo Maybe move the control stream to streams map.
+	local_control_id = undefined :: undefined | cow_http3:stream_id(),
+	local_encoder_id = undefined :: undefined | cow_http3:stream_id(),
+	local_decoder_id = undefined :: undefined | cow_http3:stream_id(),
 
 	%% Bidirectional streams used for requests and responses,
 	%% as well as unidirectional streams initiated by the client.
@@ -172,6 +174,15 @@ parse(State=#state{opts=Opts}, Data, StreamID, IsFin) ->
 %% @todo Swap Data and Stream/StreamID?
 parse1(State, Data, Stream=#stream{status=header}, IsFin) ->
 	parse_unidirectional_stream_header(State, Data, Stream, IsFin);
+parse1(State=#state{http3_machine=HTTP3Machine0}, Data,
+		#stream{status={unidi, Type}, id=StreamID}, IsFin)
+		when Type =:= encoder; Type =:= decoder ->
+	case cow_http3_machine:unidi_data(Data, IsFin, StreamID, HTTP3Machine0) of
+		{ok, Instrs, HTTP3Machine} ->
+			loop(send_instructions(State#state{http3_machine=HTTP3Machine}, Instrs));
+		{error, Error={connection_error, _, _}, HTTP3Machine} ->
+			terminate(State#state{http3_machine=HTTP3Machine}, Error)
+	end;
 parse1(State, Data, Stream=#stream{status={data, Len}, id=StreamID}, IsFin) ->
 	DataLen = byte_size(Data),
 	%% @todo We should probably error out, not crash, on frame truncation.
@@ -271,7 +282,7 @@ parse_unidirectional_stream_header(State0=#state{http3_machine=HTTP3Machine0},
 					StreamID, Type, HTTP3Machine0) of
 				{ok, HTTP3Machine} ->
 					State = State0#state{http3_machine=HTTP3Machine},
-					Stream = Stream0#stream{status=normal},
+					Stream = Stream0#stream{status={unidi, Type}},
 					parse(stream_store(State, Stream), Rest, StreamID, IsFin);
 				{error, Error={connection_error, _, _}, HTTP3Machine} ->
 					terminate(State0#state{http3_machine=HTTP3Machine}, Error)
@@ -285,7 +296,7 @@ parse_unidirectional_stream_header(State0=#state{http3_machine=HTTP3Machine0},
 			loop(stream_abort_receive(State0, Stream0, h3_stream_creation_error))
 	end.
 
-frame(State=#state{http3_machine=HTTP3Machine0, conn=Conn, local_decoder_id=DecoderID},
+frame(State=#state{http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, Frame, IsFin) ->
 %	ct:pal("cowboy frame ~p ~p", [Frame, IsFin]),
 	case cow_http3_machine:frame(Frame, IsFin, StreamID, HTTP3Machine0) of
@@ -293,21 +304,17 @@ frame(State=#state{http3_machine=HTTP3Machine0, conn=Conn, local_decoder_id=Deco
 			State#state{http3_machine=HTTP3Machine};
 		{ok, {data, Data}, HTTP3Machine} ->
 			data_frame(State#state{http3_machine=HTTP3Machine}, Stream, IsFin, Data);
-		{ok, {headers, Headers, PseudoHeaders, BodyLen}, HTTP3Machine} ->
-			headers_frame(State#state{http3_machine=HTTP3Machine},
+		{ok, {headers, Headers, PseudoHeaders, BodyLen}, Instrs, HTTP3Machine} ->
+			headers_frame(send_instructions(State#state{http3_machine=HTTP3Machine}, Instrs),
 				Stream, IsFin, Headers, PseudoHeaders, BodyLen);
-		{ok, {headers, Headers, PseudoHeaders, BodyLen}, DecData, HTTP3Machine} ->
-			%% Send the decoder data.
-			ok = cowboy_quicer:send(Conn, DecoderID, DecData),
-			headers_frame(State#state{http3_machine=HTTP3Machine},
-				Stream, IsFin, Headers, PseudoHeaders, BodyLen);
-		{ok, {trailers, _Trailers}, HTTP3Machine} ->
+		{ok, {trailers, _Trailers}, Instrs, HTTP3Machine} ->
 			%% @todo Propagate trailers.
-			State#state{http3_machine=HTTP3Machine};
+			send_instructions(State#state{http3_machine=HTTP3Machine}, Instrs);
 		{ok, GoAway={goaway, _}, HTTP3Machine} ->
 			goaway(State#state{http3_machine=HTTP3Machine}, GoAway);
-		{error, Error={stream_error, _Reason, _Human}, HTTP3Machine} ->
-			reset_stream(State#state{http3_machine=HTTP3Machine}, Stream, Error);
+		{error, Error={stream_error, _Reason, _Human}, Instrs, HTTP3Machine} ->
+			State1 = send_instructions(State#state{http3_machine=HTTP3Machine}, Instrs),
+			reset_stream(State1, Stream, Error);
 		{error, Error={connection_error, _, _}, HTTP3Machine} ->
 			terminate(State#state{http3_machine=HTTP3Machine}, Error)
 	end.
@@ -668,11 +675,11 @@ send_response(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		_ ->
 			%% @todo Add a test for HEAD to make sure we don't send the body when
 			%% returning {response...} from a stream handler (or {headers...} then {data...}).
-			%% @todo We must send EncData!
-			{ok, _IsFin, HeaderBlock, _EncData, HTTP3Machine}
+			{ok, _IsFin, HeaderBlock, Instrs, HTTP3Machine}
 				= cow_http3_machine:prepare_headers(StreamID, HTTP3Machine0, nofin,
 					#{status => cow_http:status_to_integer(StatusCode)},
 					headers_to_list(Headers)),
+			State = send_instructions(State0#state{http3_machine=HTTP3Machine}, Instrs),
 			%% @todo It might be better to do async sends.
 			_ = case Body of
 				{sendfile, Offset, Bytes, Path} ->
@@ -689,7 +696,7 @@ send_response(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 						cow_http3:data(Body)
 					], fin)
 			end,
-			maybe_send_is_fin(State0#state{http3_machine=HTTP3Machine}, Stream, fin)
+			maybe_send_is_fin(State, Stream, fin)
 	end.
 
 maybe_send_is_fin(State=#state{http3_machine=HTTP3Machine0},
@@ -705,15 +712,15 @@ maybe_send_is_fin(State, _, _) ->
 send({Conn, StreamID}, IoData) ->
 	cowboy_quicer:send(Conn, StreamID, cow_http3:data(IoData)).
 
-send_headers(State=#state{conn=Conn, http3_machine=HTTP3Machine0},
+send_headers(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		#stream{id=StreamID}, IsFin0, StatusCode, Headers) ->
-	{ok, IsFin, HeaderBlock, _EncData, HTTP3Machine}
+	{ok, IsFin, HeaderBlock, Instrs, HTTP3Machine}
 		= cow_http3_machine:prepare_headers(StreamID, HTTP3Machine0, IsFin0,
 			#{status => cow_http:status_to_integer(StatusCode)},
 			headers_to_list(Headers)),
+	State = send_instructions(State0#state{http3_machine=HTTP3Machine}, Instrs),
 	ok = cowboy_quicer:send(Conn, StreamID, cow_http3:headers(HeaderBlock), IsFin),
-	%% @todo Send _EncData.
-	State#state{http3_machine=HTTP3Machine}.
+	State.
 
 %% The set-cookie header is special; we can only send one cookie per header.
 headers_to_list(Headers0=#{<<"set-cookie">> := SetCookies}) ->
@@ -721,6 +728,23 @@ headers_to_list(Headers0=#{<<"set-cookie">> := SetCookies}) ->
 	Headers ++ [{<<"set-cookie">>, Value} || Value <- SetCookies];
 headers_to_list(Headers) ->
 	maps:to_list(Headers).
+
+%% @todo We would open unidi streams here if we only open on-demand.
+%% No instructions.
+send_instructions(State, undefined) ->
+	State;
+%% Decoder instructions.
+send_instructions(State=#state{conn=Conn, local_decoder_id=DecoderID},
+		{decoder_instructions, DecData}) ->
+	%% @todo Handle send errors.
+	ok = cowboy_quicer:send(Conn, DecoderID, DecData),
+	State;
+%% Encoder instructions.
+send_instructions(State=#state{conn=Conn, local_encoder_id=EncoderID},
+		{encoder_instructions, EncData}) ->
+	%% @todo Handle send errors.
+	ok = cowboy_quicer:send(Conn, EncoderID, EncData),
+	State.
 
 reset_stream(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, Error) ->
