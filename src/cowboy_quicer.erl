@@ -34,7 +34,35 @@
 
 -ifndef(COWBOY_QUICER).
 
-%% @todo Error out on all callbacks.
+-spec peername(_) -> no_return().
+peername(_) -> no_quicer().
+
+-spec sockname(_) -> no_return().
+sockname(_) -> no_quicer().
+
+-spec shutdown(_, _) -> no_return().
+shutdown(_, _) -> no_quicer().
+
+-spec start_unidi_stream(_, _) -> no_return().
+start_unidi_stream(_, _) -> no_quicer().
+
+-spec send(_, _, _) -> no_return().
+send(_, _, _) -> no_quicer().
+
+-spec send(_, _, _, _) -> no_return().
+send(_, _, _, _) -> no_quicer().
+
+-spec shutdown_stream(_, _, _, _) -> no_return().
+shutdown_stream(_, _, _, _) -> no_quicer().
+
+-spec handle(_) -> no_return().
+handle(_) -> no_quicer().
+
+no_quicer() ->
+	error({no_quicer,
+		"Cowboy must be compiled with environment variable COWBOY_QUICER=1 "
+		"or with compilation flag -D COWBOY_QUICER=1 in order to enable "
+		"QUIC support using the emqx/quic NIF"}).
 
 -else.
 
@@ -42,17 +70,22 @@
 
 %% Connection.
 
--spec peername(_) -> _. %% @todo
+-spec peername(quicer:connection_handle())
+	-> {ok, {inet:ip_address(), inet:port_number()}}
+	| {error, any()}.
 
 peername(Conn) ->
 	quicer:peername(Conn).
 
--spec sockname(_) -> _. %% @todo
+-spec sockname(quicer:connection_handle())
+	-> {ok, {inet:ip_address(), inet:port_number()}}
+	| {error, any()}.
 
 sockname(Conn) ->
 	quicer:sockname(Conn).
 
--spec shutdown(_, _) -> _. %% @todo
+-spec shutdown(quicer:connection_handle(), quicer:app_errno())
+	-> ok | {error, any()}.
 
 shutdown(Conn, ErrorCode) ->
 	quicer:shutdown_connection(Conn,
@@ -61,22 +94,27 @@ shutdown(Conn, ErrorCode) ->
 
 %% Streams.
 
--spec start_unidi_stream(_, _) -> _. %% @todo
+-spec start_unidi_stream(quicer:connection_handle(), iodata())
+	-> {ok, cow_http3:stream_id()}.
 
 start_unidi_stream(Conn, HeaderData) ->
-	{ok, StreamRef} = quicer:start_stream(Conn,
-		#{open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}),
+	{ok, StreamRef} = quicer:start_stream(Conn, #{
+		active => true,
+		open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
+	}),
 	{ok, _} = quicer:send(StreamRef, HeaderData),
 	{ok, StreamID} = quicer:get_stream_id(StreamRef),
 	put({quicer_stream, StreamID}, StreamRef),
 	{ok, StreamID}.
 
--spec send(_, _, _) -> _. %% @todo
+-spec send(quicer:connection_handle(), cow_http3:stream_id(), iodata())
+	-> ok | {error, any()}.
 
 send(Conn, StreamID, Data) ->
 	send(Conn, StreamID, Data, nofin).
 
--spec send(_, _, _, _) -> _. %% @todo
+-spec send(quicer:connection_handle(), cow_http3:stream_id(), iodata(), cow_http:fin())
+	-> ok | {error, any()}.
 
 send(_Conn, StreamID, Data, IsFin) ->
 	StreamRef = get({quicer_stream, StreamID}),
@@ -89,11 +127,13 @@ send(_Conn, StreamID, Data, IsFin) ->
 send_flag(nofin) -> ?QUIC_SEND_FLAG_NONE;
 send_flag(fin) -> ?QUIC_SEND_FLAG_FIN.
 
--spec shutdown_stream(_, _, _, _) -> _. %% @todo
+-spec shutdown_stream(quicer:connection_handle(),
+	cow_http3:stream_id(), both | receiving, quicer:app_errno())
+	-> ok.
 
 shutdown_stream(_Conn, StreamID, Dir, ErrorCode) ->
 	StreamRef = get({quicer_stream, StreamID}),
-	quicer:shutdown_stream(StreamRef, shutdown_flag(Dir), ErrorCode, infinity),
+	_ = quicer:shutdown_stream(StreamRef, shutdown_flag(Dir), ErrorCode, infinity),
 %	ct:pal("~p shutdown_stream res ~p", [self(), Res]),
 	ok.
 
@@ -102,8 +142,13 @@ shutdown_flag(receiving) -> ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE.
 
 %% Messages.
 
-%% @todo Probably should have the Conn given too?
--spec handle(_) -> _. %% @todo
+%% @todo Probably should have the Conn given as argument too?
+-spec handle({quic, _, _, _})
+	-> {data, cow_http3:stream_id(), cow_http:fin(), binary()}
+	| {stream_started, cow_http3:stream_id(), unidi | bidi}
+	| {stream_closed, cow_http3:stream_id(), quicer:app_errno()}
+	| closed
+	| ok.
 
 handle({quic, Data, StreamRef, #{flags := Flags}}) when is_binary(Data) ->
 	{ok, StreamID} = quicer:get_stream_id(StreamRef),
@@ -128,7 +173,7 @@ handle({quic, stream_closed, StreamRef, #{error := ErrorCode}}) ->
 	{stream_closed, StreamID, ErrorCode};
 %% QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE.
 handle({quic, closed, Conn, _Flags}) ->
-	quicer:close_connection(Conn),
+	_ = quicer:close_connection(Conn),
 	closed;
 %% The following events are currently ignored either because
 %% I do not know what they do or because we do not need to

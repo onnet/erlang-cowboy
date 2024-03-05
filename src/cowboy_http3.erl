@@ -29,7 +29,7 @@
 
 	%% Whether the stream is currently in a special state.
 	status :: header | {unidi, control | encoder | decoder}
-		| normal | {data, non_neg_integer()} | stopping,
+		| normal | {data | ignore, non_neg_integer()} | stopping,
 
 	%% Stream buffer.
 	buffer = <<>> :: binary(),
@@ -465,7 +465,7 @@ early_error(State0=#state{opts=Opts, peer=Peer},
 			Class, Exception, Stacktrace), Opts),
 		%% We still need to send an error response, so send what we initially
 		%% wanted to send. It's better than nothing.
-		send_headers(State0, StreamID, fin, StatusCode0, RespHeaders0)
+		send_headers(State0, Stream, fin, StatusCode0, RespHeaders0)
 	end.
 
 
@@ -842,9 +842,11 @@ stream_abort_receive(State=#state{conn=Conn}, Stream=#stream{id=StreamID}, Reaso
 
 %% @todo Graceful connection shutdown.
 %% We terminate the connection immediately if it hasn't fully been initialized.
+-spec goaway(#state{}, {goaway, _}) -> no_return().
 goaway(State, {goaway, _}) ->
 	terminate(State, {stop, goaway, 'The connection is going away.'}).
 
+-spec terminate(#state{}, _) -> no_return().
 terminate(State=#state{conn=Conn, %http3_status=Status,
 		%http3_machine=HTTP3Machine,
 		streams=Streams, children=Children}, Reason) ->
@@ -860,7 +862,7 @@ terminate(State=#state{conn=Conn, %http3_status=Status,
 	terminate_all_streams(State, maps:to_list(Streams), Reason),
 	cowboy_children:terminate(Children),
 %	terminate_linger(State),
-	cowboy_quicer:shutdown(Conn, cow_http3:error_to_code(terminate_reason(Reason))),
+	_ = cowboy_quicer:shutdown(Conn, cow_http3:error_to_code(terminate_reason(Reason))),
 	exit({shutdown, Reason}).
 
 terminate_reason({connection_error, Reason, _}) -> Reason;
