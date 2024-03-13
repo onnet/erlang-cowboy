@@ -76,7 +76,6 @@
 -spec init(_, _, _) -> no_return().
 
 init(Parent, Conn, Opts) ->
-%ct:pal("init"),
 	{ok, SettingsBin, HTTP3Machine0} = cow_http3_machine:init(server, Opts),
 	%% Immediately open a control, encoder and decoder stream.
 
@@ -86,7 +85,6 @@ init(Parent, Conn, Opts) ->
 	{ok, ControlID} = cowboy_quicer:start_unidi_stream(Conn, [<<0>>, SettingsBin]),
 	{ok, EncoderID} = cowboy_quicer:start_unidi_stream(Conn, <<2>>),
 	{ok, DecoderID} = cowboy_quicer:start_unidi_stream(Conn, <<3>>),
-%ct:pal("control ~p encoder ~p decoder ~p", [ControlID, EncoderID, DecoderID]),
 	%% Set the control, encoder and decoder streams in the machine.
 	HTTP3Machine = cow_http3_machine:init_unidi_local_streams(
 		ControlID, EncoderID, DecoderID, HTTP3Machine0),
@@ -110,8 +108,7 @@ init(Parent, Conn, Opts) ->
 				'A socket error occurred when retrieving the sock name.'})
 	end.
 
-loop(State0=#state{children=Children}) ->
-%ct:pal("~p", [process_info(self(), messages)]),
+loop(State0=#state{opts=Opts, children=Children}) ->
 	receive
 		Msg when element(1, Msg) =:= quic ->
 			handle_quic_msg(State0, Msg);
@@ -126,27 +123,27 @@ loop(State0=#state{children=Children}) ->
 		Msg = {'EXIT', Pid, _} ->
 			loop(down(State0, Pid, Msg));
 		Msg ->
-			ct:pal("cowboy msg ~p", [Msg]),
+			cowboy:log(warning, "Received stray message ~p.", [Msg], Opts),
 			loop(State0)
 	end.
 
-handle_quic_msg(State0, Msg) ->
+handle_quic_msg(State0=#state{opts=Opts}, Msg) ->
 	case cowboy_quicer:handle(Msg) of
 		{data, StreamID, IsFin, Data} ->
-%			ct:pal("{data, ~p, ~p, ~p}", [StreamID, IsFin, Data]),
 			parse(State0, Data, StreamID, IsFin);
 		{stream_started, StreamID, StreamType} ->
-%			ct:pal("~p stream_started ~p ~p", [self(), StreamID, StreamType]),
 			State = stream_new_remote(State0, StreamID, StreamType),
 			loop(State);
 		{stream_closed, StreamID, ErrorCode} ->
-%			ct:pal("stream_closed ~p state ~p code ~p", [StreamID, State0, ErrorCode]),
 			State = stream_closed(State0, StreamID, ErrorCode),
 			loop(State);
 		closed ->
 			%% @todo terminate here?
 			ok;
 		ok ->
+			loop(State0);
+		unknown ->
+			cowboy:log(warning, "Received unknown QUIC message ~p.", [Msg], Opts),
 			loop(State0)
 	end.
 
@@ -214,7 +211,6 @@ parse1(State=#state{opts=Opts}, Data, Stream=#stream{id=StreamID}, IsFin) ->
 	case cow_http3:parse(Data) of
 		{ok, Frame, Rest} ->
 			FrameIsFin = is_fin(IsFin, Rest),
-%			ct:pal("parse1 Frame= ~p Rest= ~p", [Frame, Rest]),
 			parse(frame(State, Stream, Frame, FrameIsFin), Rest, StreamID, IsFin);
 		{more, Frame = {data, _}, Len} ->
 			%% We're at the end of the data so FrameIsFin is equivalent to IsFin.
@@ -298,7 +294,6 @@ parse_unidirectional_stream_header(State0=#state{http3_machine=HTTP3Machine0},
 
 frame(State=#state{http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, Frame, IsFin) ->
-%	ct:pal("cowboy frame ~p ~p", [Frame, IsFin]),
 	case cow_http3_machine:frame(Frame, IsFin, StreamID, HTTP3Machine0) of
 		{ok, HTTP3Machine} ->
 			State#state{http3_machine=HTTP3Machine};
@@ -421,11 +416,8 @@ headers_to_map([{Name, Value}|Tail], Acc0) ->
 	headers_to_map(Tail, Acc).
 
 headers_frame(State=#state{opts=Opts}, Stream=#stream{id=StreamID}, Req) ->
-%ct:pal("req ~p", [Req]),
 	try cowboy_stream:init(StreamID, Req, Opts) of
 		{Commands, StreamState} ->
-%logger:error("~p", [Commands]),
-%logger:error("~p", [StreamState]),
 			commands(State, Stream#stream{state=StreamState}, Commands)
 	catch Class:Exception:Stacktrace ->
 		cowboy:log(cowboy_stream:make_error_log(init,
@@ -434,11 +426,6 @@ headers_frame(State=#state{opts=Opts}, Stream=#stream{id=StreamID}, Req) ->
 		reset_stream(State, Stream, {internal_error, {Class, Exception},
 			'Unhandled exception in cowboy_stream:init/3.'})
 	end.
-
-
-
-
-
 
 early_error(State0=#state{opts=Opts, peer=Peer},
 		Stream=#stream{id=StreamID}, _IsFin, Headers, #{method := Method},
@@ -499,13 +486,10 @@ down(State0=#state{opts=Opts, children=Children0}, Pid, Msg) ->
 	end.
 
 info(State=#state{opts=Opts, http3_machine=_HTTP3Machine}, StreamID, Msg) ->
-%ct:pal("INFO ~p ~p ~p", [State, StreamID, Msg]),
 	case stream_get(State, StreamID) of
 		Stream=#stream{state=StreamState0} ->
 			try cowboy_stream:info(StreamID, Msg, StreamState0) of
 				{Commands, StreamState} ->
-%ct:pal("~p", [Commands]),
-%logger:error("~p ~p", [StreamID, Streams]),
 					commands(State, Stream#stream{state=StreamState}, Commands)
 			catch Class:Exception:Stacktrace ->
 				cowboy:log(cowboy_stream:make_error_log(info,
@@ -544,17 +528,14 @@ commands(State0, Stream, [{inform, StatusCode, Headers}|Tail]) ->
 	commands(State, Stream, Tail);
 %% Send response headers.
 commands(State0, Stream, [{response, StatusCode, Headers, Body}|Tail]) ->
-%	ct:pal("~p commands response ~p ~p ~p", [self(), StatusCode, Headers, try iolist_size(Body) catch _:_ -> Body end]),
 	State = send_response(State0, Stream, StatusCode, Headers, Body),
 	commands(State, Stream, Tail);
 %% Send response headers.
 commands(State0, Stream, [{headers, StatusCode, Headers}|Tail]) ->
-%	ct:pal("commands headers ~p ~p", [StatusCode, Headers]),
 	State = send_headers(State0, Stream, nofin, StatusCode, Headers),
 	commands(State, Stream, Tail);
 %%% Send a response body chunk.
 commands(State0=#state{conn=Conn}, Stream=#stream{id=StreamID}, [{data, IsFin, Data}|Tail]) ->
-%	ct:pal("commands data ~p ~p", [IsFin, try iolist_size(Data) catch _:_ -> Data end]),
 	_ = case Data of
 		{sendfile, Offset, Bytes, Path} ->
 			%% Temporary solution to do sendfile over QUIC.
@@ -569,16 +550,13 @@ commands(State0=#state{conn=Conn}, Stream=#stream{id=StreamID}, [{data, IsFin, D
 %%% Send trailers.
 commands(State=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, [{trailers, Trailers}|Tail]) ->
-%	ct:pal("commands trailers ~p", [Trailers]),
 	HTTP3Machine = case cow_http3_machine:prepare_trailers(
 			StreamID, HTTP3Machine0, maps:to_list(Trailers)) of
 		{trailers, HeaderBlock, _EncData, HTTP3Machine1} ->
-%			ct:pal("trailers"),
 			%% @todo EncData!!
 			ok = cowboy_quicer:send(Conn, StreamID, cow_http3:headers(HeaderBlock), fin),
 			HTTP3Machine1;
 		{no_trailers, HTTP3Machine1} ->
-%			ct:pal("no_trailers"),
 			ok = cowboy_quicer:send(Conn, StreamID, cow_http3:data(<<>>), fin),
 			HTTP3Machine1
 	end,
@@ -653,7 +631,6 @@ commands(State0, Stream0=#stream{id=StreamID},
 commands(State, Stream, [{set_options, _Opts}|Tail]) ->
 	commands(State, Stream, Tail);
 commands(State, Stream, [stop|_Tail]) ->
-%	ct:pal("stop"),
 	%% @todo Do we want to run the commands after a stop?
 	%% @todo Do we even allow commands after?
 	stop_stream(stream_store(State, Stream), Stream);
@@ -748,7 +725,6 @@ send_instructions(State=#state{conn=Conn, local_encoder_id=EncoderID},
 
 reset_stream(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, Error) ->
-%ct:pal("~p reset_stream ~p ~p", [self(), Stream, Error]),
 	Reason = case Error of
 		{internal_error, _, _} -> h3_internal_error;
 		{stream_error, Reason0, _} -> Reason0
@@ -757,7 +733,6 @@ reset_stream(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 	%% @todo Should we close the send side if the receive side was already closed?
 	cowboy_quicer:shutdown_stream(Conn, StreamID,
 		both, cow_http3:error_to_code(Reason)),
-%	ct:pal("~p reset_stream res ~p", [self(), Res]),
 	State1 = case cow_http3_machine:reset_stream(StreamID, HTTP3Machine0) of
 		{ok, HTTP3Machine} ->
 			terminate_stream(State0#state{http3_machine=HTTP3Machine}, Stream, Error);
@@ -775,7 +750,6 @@ reset_stream(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 	State1.
 
 stop_stream(State0=#state{http3_machine=HTTP3Machine}, Stream=#stream{id=StreamID}) ->
-%ct:pal("stop_stream ~p ~p", [State0, Stream]),
 	%% We abort reading when stopping the stream but only
 	%% if the client was not finished sending data.
 	%% We mark the stream as 'stopping' either way.
@@ -797,7 +771,6 @@ stop_stream(State0=#state{http3_machine=HTTP3Machine}, Stream=#stream{id=StreamI
 		%% When a response was sent but not terminated, we need to close the stream.
 		%% We send a final DATA frame to complete the stream.
 		{ok, nofin} ->
-%			ct:pal("error nofin"),
 			info(State, StreamID, {data, fin, <<>>});
 		%% When a response was sent fully we can terminate the stream,
 		%% regardless of the stream being in half-closed or closed state.

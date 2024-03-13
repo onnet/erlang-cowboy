@@ -26,6 +26,9 @@
 -export([log/2]).
 -export([log/4]).
 
+%% Don't warn about the bad quicer specs.
+-dialyzer([{nowarn_function, start_quic/2}]).
+
 -type opts() :: cowboy_http:opts() | cowboy_http2:opts().
 -export_type([opts/0]).
 
@@ -85,10 +88,8 @@ start_quic(TransOpts, ProtoOpts) ->
 	_ListenerPid = spawn(fun() ->
 		{ok, Listener} = quicer:listen(Port, SocketOpts),
 		Parent ! {ok, Listener},
-		ct:pal("listen ~p", [Listener]),
 		_AcceptorPid = [spawn(fun AcceptLoop() ->
 			{ok, Conn} = quicer:accept(Listener, []),
-%			ct:pal("accept ~p", [Conn]),
 			Pid = spawn(fun() ->
 				receive go -> ok end,
 				%% We have to do the handshake after handing control of
@@ -96,12 +97,11 @@ start_quic(TransOpts, ProtoOpts) ->
 				%% the controlling process is changed and messages will
 				%% not be sent to the correct process.
 				{ok, Conn} = quicer:handshake(Conn),
-%				ct:pal("handshake ~p", [Conn]),
 				process_flag(trap_exit, true), %% @todo Only if supervisor though.
 				try cowboy_http3:init(Parent, Conn, ProtoOpts)
 				catch
 					exit:{shutdown,_} -> ok;
-					C:E:S -> ct:pal("CRASH ~p:~p:~p", [C,E,S])
+					C:E:S -> log(error, "CRASH ~p:~p:~p", [C,E,S], ProtoOpts)
 				end
 			end),
 			ok = quicer:controlling_process(Conn, Pid),
@@ -130,7 +130,6 @@ port_0() ->
 		_ ->
 			ok
 	end,
-	ct:pal("port_0: ~p", [Port]),
 	Port.
 
 ensure_connection_type(TransOpts=#{connection_type := ConnectionType}) ->

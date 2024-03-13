@@ -66,25 +66,29 @@ no_quicer() ->
 
 -else.
 
+%% @todo Make quicer export these types.
+-type quicer_connection_handle() :: reference().
+-type quicer_app_errno() :: non_neg_integer().
+
 -include_lib("quicer/include/quicer.hrl").
 
 %% Connection.
 
--spec peername(quicer:connection_handle())
+-spec peername(quicer_connection_handle())
 	-> {ok, {inet:ip_address(), inet:port_number()}}
 	| {error, any()}.
 
 peername(Conn) ->
 	quicer:peername(Conn).
 
--spec sockname(quicer:connection_handle())
+-spec sockname(quicer_connection_handle())
 	-> {ok, {inet:ip_address(), inet:port_number()}}
 	| {error, any()}.
 
 sockname(Conn) ->
 	quicer:sockname(Conn).
 
--spec shutdown(quicer:connection_handle(), quicer:app_errno())
+-spec shutdown(quicer_connection_handle(), quicer_app_errno())
 	-> ok | {error, any()}.
 
 shutdown(Conn, ErrorCode) ->
@@ -94,7 +98,7 @@ shutdown(Conn, ErrorCode) ->
 
 %% Streams.
 
--spec start_unidi_stream(quicer:connection_handle(), iodata())
+-spec start_unidi_stream(quicer_connection_handle(), iodata())
 	-> {ok, cow_http3:stream_id()}.
 
 start_unidi_stream(Conn, HeaderData) ->
@@ -107,13 +111,13 @@ start_unidi_stream(Conn, HeaderData) ->
 	put({quicer_stream, StreamID}, StreamRef),
 	{ok, StreamID}.
 
--spec send(quicer:connection_handle(), cow_http3:stream_id(), iodata())
+-spec send(quicer_connection_handle(), cow_http3:stream_id(), iodata())
 	-> ok | {error, any()}.
 
 send(Conn, StreamID, Data) ->
 	send(Conn, StreamID, Data, nofin).
 
--spec send(quicer:connection_handle(), cow_http3:stream_id(), iodata(), cow_http:fin())
+-spec send(quicer_connection_handle(), cow_http3:stream_id(), iodata(), cow_http:fin())
 	-> ok | {error, any()}.
 
 send(_Conn, StreamID, Data, IsFin) ->
@@ -127,14 +131,13 @@ send(_Conn, StreamID, Data, IsFin) ->
 send_flag(nofin) -> ?QUIC_SEND_FLAG_NONE;
 send_flag(fin) -> ?QUIC_SEND_FLAG_FIN.
 
--spec shutdown_stream(quicer:connection_handle(),
-	cow_http3:stream_id(), both | receiving, quicer:app_errno())
+-spec shutdown_stream(quicer_connection_handle(),
+	cow_http3:stream_id(), both | receiving, quicer_app_errno())
 	-> ok.
 
 shutdown_stream(_Conn, StreamID, Dir, ErrorCode) ->
 	StreamRef = get({quicer_stream, StreamID}),
 	_ = quicer:shutdown_stream(StreamRef, shutdown_flag(Dir), ErrorCode, infinity),
-%	ct:pal("~p shutdown_stream res ~p", [self(), Res]),
 	ok.
 
 shutdown_flag(both) -> ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT;
@@ -146,9 +149,10 @@ shutdown_flag(receiving) -> ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE.
 -spec handle({quic, _, _, _})
 	-> {data, cow_http3:stream_id(), cow_http:fin(), binary()}
 	| {stream_started, cow_http3:stream_id(), unidi | bidi}
-	| {stream_closed, cow_http3:stream_id(), quicer:app_errno()}
+	| {stream_closed, cow_http3:stream_id(), quicer_app_errno()}
 	| closed
-	| ok.
+	| ok
+	| unknown.
 
 handle({quic, Data, StreamRef, #{flags := Flags}}) when is_binary(Data) ->
 	{ok, StreamID} = quicer:get_stream_id(StreamRef),
@@ -186,14 +190,12 @@ handle({quic, dgram_state_changed, _Conn, _Props}) ->
 handle({quic, transport_shutdown, _Conn, _Flags}) ->
 	ok;
 handle({quic, peer_send_shutdown, _StreamRef, undefined}) ->
-%	ct:pal("peer_send_shutdown ~p", [StreamRef]),
 	ok;
 handle({quic, send_shutdown_complete, _StreamRef, _IsGraceful}) ->
 	ok;
 handle({quic, shutdown, _Conn, success}) ->
 	ok;
-handle(Msg) ->
-	ct:pal("Ignoring quicer message ~p", [Msg]),
-	ok.
+handle(_Msg) ->
+	unknown.
 
 -endif.
