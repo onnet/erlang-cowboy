@@ -19,13 +19,40 @@
 
 -module(cowboy_http3).
 
--export([init/3]).
+-export([init/4]).
 
 %% Temporary callback to do sendfile over QUIC.
 -export([send/2]).
 
+%% @todo Graceful shutdown? Linger? Timeouts? Frame rates? PROXY header?
+-type opts() :: #{
+	compress_buffering => boolean(),
+	compress_threshold => non_neg_integer(),
+	connection_type => worker | supervisor,
+	enable_connect_protocol => boolean(),
+	env => cowboy_middleware:env(),
+	logger => module(),
+    max_decode_blocked_streams => 0..16#3fffffffffffffff,
+    max_decode_table_size => 0..16#3fffffffffffffff,
+    max_encode_blocked_streams => 0..16#3fffffffffffffff,
+    max_encode_table_size => 0..16#3fffffffffffffff,
+	max_ignored_frame_size_received => non_neg_integer() | infinity,
+	metrics_callback => cowboy_metrics_h:metrics_callback(),
+	metrics_req_filter => fun((cowboy_req:req()) -> map()),
+	metrics_resp_headers_filter => fun((cowboy:http_headers()) -> cowboy:http_headers()),
+	middlewares => [module()],
+	shutdown_timeout => timeout(),
+	stream_handlers => [module()],
+	tracer_callback => cowboy_tracer_h:tracer_callback(),
+	tracer_flags => [atom()],
+	tracer_match_specs => cowboy_tracer_h:tracer_match_specs(),
+	%% Open ended because configured stream handlers might add options.
+	_ => _
+}.
+-export_type([opts/0]).
+
 -record(stream, {
-	id :: non_neg_integer(), %% @todo specs
+	id :: cow_http3:stream_id(),
 
 	%% Whether the stream is currently in a special state.
 	status :: header | {unidi, control | encoder | decoder}
@@ -40,8 +67,9 @@
 
 -record(state, {
 	parent :: pid(),
-	conn :: any(), %% @todo specs
-	opts = #{} :: any(), %% @todo opts(),
+	ref :: ranch:ref(),
+	conn :: cowboy_quicer:quicer_connection_handle(),
+	opts = #{} :: opts(),
 
 	%% Remote address and port for the connection.
 	peer = undefined :: {inet:ip_address(), inet:port_number()},
@@ -49,19 +77,20 @@
 	%% Local address and port for the connection.
 	sock = undefined :: {inet:ip_address(), inet:port_number()},
 
+	%% Client certificate.
+	cert :: undefined | binary(),
+
 	%% HTTP/3 state machine.
 	http3_machine :: cow_http3_machine:http3_machine(),
 
 	%% Specially handled local unidi streams.
-	%% @todo Maybe move the control stream to streams map.
 	local_control_id = undefined :: undefined | cow_http3:stream_id(),
 	local_encoder_id = undefined :: undefined | cow_http3:stream_id(),
 	local_decoder_id = undefined :: undefined | cow_http3:stream_id(),
 
 	%% Bidirectional streams used for requests and responses,
 	%% as well as unidirectional streams initiated by the client.
-	streams = #{} :: map(), %% @todo specs
-	%% @todo a ref/id map because stream_closed we don't have the id
+	streams = #{} :: #{cow_http3:stream_id() => #stream{}},
 
 	%% Lingering streams that were recently reset. We may receive
 	%% pending data or messages for these streams a short while
@@ -73,9 +102,10 @@
 	children = cowboy_children:init() :: cowboy_children:children()
 }).
 
--spec init(_, _, _) -> no_return().
+-spec init(pid(), ranch:ref(), cowboy_quicer:quicer_connection_handle(), opts())
+	-> no_return().
 
-init(Parent, Conn, Opts) ->
+init(Parent, Ref, Conn, Opts) ->
 	{ok, SettingsBin, HTTP3Machine0} = cow_http3_machine:init(server, Opts),
 	%% Immediately open a control, encoder and decoder stream.
 
@@ -88,25 +118,24 @@ init(Parent, Conn, Opts) ->
 	%% Set the control, encoder and decoder streams in the machine.
 	HTTP3Machine = cow_http3_machine:init_unidi_local_streams(
 		ControlID, EncoderID, DecoderID, HTTP3Machine0),
-	%% Get the peername/sockname.
-	Peer0 = cowboy_quicer:peername(Conn),
-	Sock0 = cowboy_quicer:sockname(Conn),
-	%% @todo Get the peer certificate here if it makes sense.
-	case {Peer0, Sock0} of
-		{{ok, Peer}, {ok, Sock}} ->
-			%% Quick! Let's go!
-			loop(#state{parent=Parent, conn=Conn, opts=Opts,
-				peer=Peer, sock=Sock, http3_machine=HTTP3Machine,
-				local_control_id=ControlID,
-				local_encoder_id=EncoderID,
-				local_decoder_id=DecoderID});
-		{{error, Reason}, _} ->
-			terminate(undefined, {socket_error, Reason,
-				'A socket error occurred when retrieving the peer name.'});
-		{_, {error, Reason}} ->
-			terminate(undefined, {socket_error, Reason,
-				'A socket error occurred when retrieving the sock name.'})
-	end.
+	%% Get the peername/sockname/cert.
+	{ok, Peer} = maybe_socket_error(undefined, cowboy_quicer:peername(Conn),
+		'A socket error occurred when retrieving the peer name.'),
+	{ok, Sock} = maybe_socket_error(undefined, cowboy_quicer:sockname(Conn),
+		'A socket error occurred when retrieving the sock name.'),
+	CertResult = case cowboy_quicer:peercert(Conn) of
+		{error, no_peercert} ->
+			{ok, undefined};
+		Cert0 ->
+			Cert0
+	end,
+	{ok, Cert} = maybe_socket_error(undefined, CertResult,
+		'A socket error occurred when retrieving the client TLS certificate.'),
+	%% Quick! Let's go!
+	loop(#state{parent=Parent, ref=Ref, conn=Conn,
+		opts=Opts, peer=Peer, sock=Sock, cert=Cert,
+		http3_machine=HTTP3Machine, local_control_id=ControlID,
+		local_encoder_id=EncoderID, local_decoder_id=DecoderID}).
 
 loop(State0=#state{opts=Opts, children=Children}) ->
 	receive
@@ -130,7 +159,7 @@ loop(State0=#state{opts=Opts, children=Children}) ->
 handle_quic_msg(State0=#state{opts=Opts}, Msg) ->
 	case cowboy_quicer:handle(Msg) of
 		{data, StreamID, IsFin, Data} ->
-			parse(State0, Data, StreamID, IsFin);
+			parse(State0, StreamID, Data, IsFin);
 		{stream_started, StreamID, StreamType} ->
 			State = stream_new_remote(State0, StreamID, StreamType),
 			loop(State);
@@ -138,8 +167,9 @@ handle_quic_msg(State0=#state{opts=Opts}, Msg) ->
 			State = stream_closed(State0, StreamID, ErrorCode),
 			loop(State);
 		closed ->
-			%% @todo terminate here?
-			ok;
+			%% @todo Different error reason if graceful?
+			Reason = {socket_error, closed, 'The socket has been closed.'},
+			terminate(State0, Reason);
 		ok ->
 			loop(State0);
 		unknown ->
@@ -147,14 +177,14 @@ handle_quic_msg(State0=#state{opts=Opts}, Msg) ->
 			loop(State0)
 	end.
 
-parse(State=#state{opts=Opts}, Data, StreamID, IsFin) ->
+parse(State=#state{opts=Opts}, StreamID, Data, IsFin) ->
 	case stream_get(State, StreamID) of
 		Stream=#stream{buffer= <<>>} ->
-			parse1(State, Data, Stream, IsFin);
+			parse1(State, Stream, Data, IsFin);
 		Stream=#stream{buffer=Buffer} ->
 			Stream1 = Stream#stream{buffer= <<>>},
 			parse1(stream_store(State, Stream1),
-				<<Buffer/binary, Data/binary>>, Stream1, IsFin);
+				Stream1, <<Buffer/binary, Data/binary>>, IsFin);
 		%% Pending data for a stream that has been reset. Ignore.
 		error ->
 			case is_lingering_stream(State, StreamID) of
@@ -168,11 +198,10 @@ parse(State=#state{opts=Opts}, Data, StreamID, IsFin) ->
 			loop(State)
 	end.
 
-%% @todo Swap Data and Stream/StreamID?
-parse1(State, Data, Stream=#stream{status=header}, IsFin) ->
-	parse_unidirectional_stream_header(State, Data, Stream, IsFin);
-parse1(State=#state{http3_machine=HTTP3Machine0}, Data,
-		#stream{status={unidi, Type}, id=StreamID}, IsFin)
+parse1(State, Stream=#stream{status=header}, Data, IsFin) ->
+	parse_unidirectional_stream_header(State, Stream, Data, IsFin);
+parse1(State=#state{http3_machine=HTTP3Machine0},
+		#stream{status={unidi, Type}, id=StreamID}, Data, IsFin)
 		when Type =:= encoder; Type =:= decoder ->
 	case cow_http3_machine:unidi_data(Data, IsFin, StreamID, HTTP3Machine0) of
 		{ok, Instrs, HTTP3Machine} ->
@@ -180,9 +209,8 @@ parse1(State=#state{http3_machine=HTTP3Machine0}, Data,
 		{error, Error={connection_error, _, _}, HTTP3Machine} ->
 			terminate(State#state{http3_machine=HTTP3Machine}, Error)
 	end;
-parse1(State, Data, Stream=#stream{status={data, Len}, id=StreamID}, IsFin) ->
+parse1(State, Stream=#stream{status={data, Len}, id=StreamID}, Data, IsFin) ->
 	DataLen = byte_size(Data),
-	%% @todo We should probably error out, not crash, on frame truncation.
 	if
 		DataLen < Len ->
 			%% We don't have the full frame but this is the end of the
@@ -192,26 +220,25 @@ parse1(State, Data, Stream=#stream{status={data, Len}, id=StreamID}, IsFin) ->
 			<<Data1:Len/binary, Rest/bits>> = Data,
 			FrameIsFin = is_fin(IsFin, Rest),
 			parse(frame(State, Stream#stream{status=normal}, {data, Data1}, FrameIsFin),
-				Rest, StreamID, IsFin)
+				StreamID, Rest, IsFin)
 	end;
-parse1(State, Data, Stream=#stream{status={ignore, Len}, id=StreamID}, IsFin) ->
+parse1(State, Stream=#stream{status={ignore, Len}, id=StreamID}, Data, IsFin) ->
 	DataLen = byte_size(Data),
-	%% @todo We should probably error out, not crash, on frame truncation.
 	if
 		DataLen < Len ->
 			loop(stream_store(State, Stream#stream{status={ignore, Len - DataLen}}));
 		true ->
 			<<_:Len/binary, Rest/bits>> = Data,
 			parse(stream_store(State, Stream#stream{status=normal}),
-				Rest, StreamID, IsFin)
+				StreamID, Rest, IsFin)
 	end;
 %% @todo Clause that discards receiving data for stopping streams.
 %%       We may receive a few more frames after we abort receiving.
-parse1(State=#state{opts=Opts}, Data, Stream=#stream{id=StreamID}, IsFin) ->
+parse1(State=#state{opts=Opts}, Stream=#stream{id=StreamID}, Data, IsFin) ->
 	case cow_http3:parse(Data) of
 		{ok, Frame, Rest} ->
 			FrameIsFin = is_fin(IsFin, Rest),
-			parse(frame(State, Stream, Frame, FrameIsFin), Rest, StreamID, IsFin);
+			parse(frame(State, Stream, Frame, FrameIsFin), StreamID, Rest, IsFin);
 		{more, Frame = {data, _}, Len} ->
 			%% We're at the end of the data so FrameIsFin is equivalent to IsFin.
 			case IsFin of
@@ -246,7 +273,7 @@ parse1(State=#state{opts=Opts}, Data, Stream=#stream{id=StreamID}, IsFin) ->
 						'Last frame on stream was truncated. (RFC9114 7.1)'})
 			end;
 		{ignore, Rest} ->
-			parse(ignored_frame(State, Stream), Rest, StreamID, IsFin);
+			parse(ignored_frame(State, Stream), StreamID, Rest, IsFin);
 		Error = {connection_error, _, _} ->
 			terminate(State, Error);
 		more when Data =:= <<>> ->
@@ -271,7 +298,7 @@ is_fin(fin, <<>>) -> fin;
 is_fin(_, _) -> nofin.
 
 parse_unidirectional_stream_header(State0=#state{http3_machine=HTTP3Machine0},
-		Data, Stream0=#stream{id=StreamID}, IsFin) ->
+		Stream0=#stream{id=StreamID}, Data, IsFin) ->
 	case cow_http3:parse_unidi_stream_header(Data) of
 		{ok, Type, Rest} when Type =:= control; Type =:= encoder; Type =:= decoder ->
 			case cow_http3_machine:set_unidi_remote_stream_type(
@@ -279,7 +306,7 @@ parse_unidirectional_stream_header(State0=#state{http3_machine=HTTP3Machine0},
 				{ok, HTTP3Machine} ->
 					State = State0#state{http3_machine=HTTP3Machine},
 					Stream = Stream0#stream{status={unidi, Type}},
-					parse(stream_store(State, Stream), Rest, StreamID, IsFin);
+					parse(stream_store(State, Stream), StreamID, Rest, IsFin);
 				{error, Error={connection_error, _, _}, HTTP3Machine} ->
 					terminate(State0#state{http3_machine=HTTP3Machine}, Error)
 			end;
@@ -347,7 +374,7 @@ headers_frame(State, Stream, IsFin, Headers, PseudoHeaders, BodyLen) ->
 				'Requests translated from HTTP/1.1 must include a host header. (RFC7540 8.1.2.3, RFC7230 5.4)'})
 	end.
 
-headers_frame_parse_host(State=#state{peer=Peer, sock=Sock},
+headers_frame_parse_host(State=#state{ref=Ref, peer=Peer, sock=Sock, cert=Cert},
 		Stream=#stream{id=StreamID}, IsFin, Headers,
 		PseudoHeaders=#{method := Method, scheme := Scheme, path := PathWithQs},
 		BodyLen, Authority) ->
@@ -360,12 +387,12 @@ headers_frame_parse_host(State=#state{peer=Peer, sock=Sock},
 						'The path component must not be empty. (RFC7540 8.1.2.3)'});
 				{Path, Qs} ->
 					Req0 = #{
-						ref => quic, %% @todo Ref,
+						ref => Ref,
 						pid => self(),
 						streamid => StreamID,
 						peer => Peer,
 						sock => Sock,
-						cert => undefined, %Cert, %% @todo
+						cert => Cert,
 						method => Method,
 						scheme => Scheme,
 						host => Host,
@@ -393,7 +420,7 @@ headers_frame_parse_host(State=#state{peer=Peer, sock=Sock},
 	end.
 
 %% @todo Copied from cowboy_http2.
-%% @todo Remove "http"? Probably.
+%% @todo How to handle "http"?
 ensure_port(<<"http">>, undefined) -> 80;
 ensure_port(<<"https">>, undefined) -> 443;
 ensure_port(_, Port) -> Port.
@@ -427,7 +454,7 @@ headers_frame(State=#state{opts=Opts}, Stream=#stream{id=StreamID}, Req) ->
 			'Unhandled exception in cowboy_stream:init/3.'})
 	end.
 
-early_error(State0=#state{opts=Opts, peer=Peer},
+early_error(State0=#state{ref=Ref, opts=Opts, peer=Peer},
 		Stream=#stream{id=StreamID}, _IsFin, Headers, #{method := Method},
 		StatusCode0, HumanReadable) ->
 	%% We automatically terminate the stream but it is not an error
@@ -435,9 +462,8 @@ early_error(State0=#state{opts=Opts, peer=Peer},
 	Reason = {stream_error, h3_no_error, HumanReadable},
 	%% The partial Req is minimal for now. We only have one case
 	%% where it can be called (when a method is completely disabled).
-	%% @todo Fill in the other elements.
 	PartialReq = #{
-		ref => quic, %% @todo Ref,
+		ref => Ref,
 		peer => Peer,
 		method => Method,
 		headers => headers_to_map(Headers, #{})
@@ -454,12 +480,6 @@ early_error(State0=#state{opts=Opts, peer=Peer},
 		%% wanted to send. It's better than nothing.
 		send_headers(State0, Stream, fin, StatusCode0, RespHeaders0)
 	end.
-
-
-
-
-
-
 
 %% Erlang messages.
 
@@ -548,19 +568,19 @@ commands(State0=#state{conn=Conn}, Stream=#stream{id=StreamID}, [{data, IsFin, D
 	State = maybe_send_is_fin(State0, Stream, IsFin),
 	commands(State, Stream, Tail);
 %%% Send trailers.
-commands(State=#state{conn=Conn, http3_machine=HTTP3Machine0},
+commands(State0=#state{conn=Conn, http3_machine=HTTP3Machine0},
 		Stream=#stream{id=StreamID}, [{trailers, Trailers}|Tail]) ->
-	HTTP3Machine = case cow_http3_machine:prepare_trailers(
+	State = case cow_http3_machine:prepare_trailers(
 			StreamID, HTTP3Machine0, maps:to_list(Trailers)) of
-		{trailers, HeaderBlock, _EncData, HTTP3Machine1} ->
-			%% @todo EncData!!
+		{trailers, HeaderBlock, Instrs, HTTP3Machine} ->
+			State1 = send_instructions(State0#state{http3_machine=HTTP3Machine}, Instrs),
 			ok = cowboy_quicer:send(Conn, StreamID, cow_http3:headers(HeaderBlock), fin),
-			HTTP3Machine1;
-		{no_trailers, HTTP3Machine1} ->
+			State1;
+		{no_trailers, HTTP3Machine} ->
 			ok = cowboy_quicer:send(Conn, StreamID, cow_http3:data(<<>>), fin),
-			HTTP3Machine1
+			State0#state{http3_machine=HTTP3Machine}
 	end,
-	commands(State#state{http3_machine=HTTP3Machine}, Stream, Tail);
+	commands(State, Stream, Tail);
 %% Send a push promise.
 %%
 %% @todo Responses sent as a result of a push_promise request
@@ -819,7 +839,22 @@ stream_abort_receive(State=#state{conn=Conn}, Stream=#stream{id=StreamID}, Reaso
 goaway(State, {goaway, _}) ->
 	terminate(State, {stop, goaway, 'The connection is going away.'}).
 
--spec terminate(#state{}, _) -> no_return().
+%% Function copied from cowboy_http.
+%maybe_socket_error(State, {error, closed}) ->
+%	terminate(State, {socket_error, closed, 'The socket has been closed.'});
+%maybe_socket_error(State, Reason) ->
+%	maybe_socket_error(State, Reason, 'An error has occurred on the socket.').
+
+%maybe_socket_error(_, Result = ok, _) ->
+%	Result;
+maybe_socket_error(_, Result = {ok, _}, _) ->
+	Result;
+maybe_socket_error(State, {error, Reason}, Human) ->
+	terminate(State, {socket_error, Reason, Human}).
+
+-spec terminate(#state{} | undefined, _) -> no_return().
+terminate(undefined, Reason) ->
+	exit({shutdown, Reason});
 terminate(State=#state{conn=Conn, %http3_status=Status,
 		%http3_machine=HTTP3Machine,
 		streams=Streams, children=Children}, Reason) ->

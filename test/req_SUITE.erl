@@ -191,7 +191,7 @@ cert(Config) ->
 	case config(type, Config) of
 		tcp -> doc("TLS certificates can only be provided over TLS.");
 		ssl -> do_cert(Config);
-		quic -> {skip, "Implement using quicer:peercert/1."}
+		quic -> do_cert(Config)
 	end.
 
 do_cert(Config) ->

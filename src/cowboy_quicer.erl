@@ -19,6 +19,7 @@
 %% Connection.
 -export([peername/1]).
 -export([sockname/1]).
+-export([peercert/1]).
 -export([shutdown/2]).
 
 %% Streams.
@@ -68,6 +69,8 @@ no_quicer() ->
 
 %% @todo Make quicer export these types.
 -type quicer_connection_handle() :: reference().
+-export_type([quicer_connection_handle/0]).
+
 -type quicer_app_errno() :: non_neg_integer().
 
 -include_lib("quicer/include/quicer.hrl").
@@ -87,6 +90,13 @@ peername(Conn) ->
 
 sockname(Conn) ->
 	quicer:sockname(Conn).
+
+-spec peercert(quicer_connection_handle())
+	-> {ok, public_key:der_encoded()}
+	| {error, any()}.
+
+peercert(Conn) ->
+  quicer_nif:peercert(Conn).
 
 -spec shutdown(quicer_connection_handle(), quicer_app_errno())
 	-> ok | {error, any()}.

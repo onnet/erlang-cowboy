@@ -16,7 +16,7 @@
 
 -export([start_clear/3]).
 -export([start_tls/3]).
--export([start_quic/2]).
+-export([start_quic/3]).
 -export([stop_listener/1]).
 -export([get_env/2]).
 -export([get_env/3]).
@@ -27,7 +27,7 @@
 -export([log/4]).
 
 %% Don't warn about the bad quicer specs.
--dialyzer([{nowarn_function, start_quic/2}]).
+-dialyzer([{nowarn_function, start_quic/3}]).
 
 -type opts() :: cowboy_http:opts() | cowboy_http2:opts().
 -export_type([opts/0]).
@@ -48,6 +48,7 @@
 
 -spec start_clear(ranch:ref(), ranch:opts(), opts())
 	-> {ok, pid()} | {error, any()}.
+
 start_clear(Ref, TransOpts0, ProtoOpts0) ->
 	TransOpts1 = ranch:normalize_opts(TransOpts0),
 	{TransOpts, ConnectionType} = ensure_connection_type(TransOpts1),
@@ -56,6 +57,7 @@ start_clear(Ref, TransOpts0, ProtoOpts0) ->
 
 -spec start_tls(ranch:ref(), ranch:opts(), opts())
 	-> {ok, pid()} | {error, any()}.
+
 start_tls(Ref, TransOpts0, ProtoOpts0) ->
 	TransOpts1 = ranch:normalize_opts(TransOpts0),
 	SocketOpts = maps:get(socket_opts, TransOpts1, []),
@@ -69,8 +71,13 @@ start_tls(Ref, TransOpts0, ProtoOpts0) ->
 %% @todo Experimental function to start a barebone QUIC listener.
 %%       This will need to be reworked to be closer to Ranch
 %%       listeners and provide equivalent features.
--spec start_quic(_, _) -> todo.
-start_quic(TransOpts, ProtoOpts) ->
+%%
+%% @todo Better type for transport options. Might require fixing quicer types.
+
+-spec start_quic(ranch:ref(), #{socket_opts => [{atom(), _}]}, cowboy_http3:opts())
+	-> {ok, pid()}.
+
+start_quic(Ref, TransOpts, ProtoOpts) ->
 	{ok, _} = application:ensure_all_started(quicer),
 	Parent = self(),
 	SocketOpts0 = maps:get(socket_opts, TransOpts, []),
@@ -98,7 +105,7 @@ start_quic(TransOpts, ProtoOpts) ->
 				%% not be sent to the correct process.
 				{ok, Conn} = quicer:handshake(Conn),
 				process_flag(trap_exit, true), %% @todo Only if supervisor though.
-				try cowboy_http3:init(Parent, Conn, ProtoOpts)
+				try cowboy_http3:init(Parent, Ref, Conn, ProtoOpts)
 				catch
 					exit:{shutdown,_} -> ok;
 					C:E:S -> log(error, "CRASH ~p:~p:~p", [C,E,S], ProtoOpts)
@@ -138,22 +145,26 @@ ensure_connection_type(TransOpts) ->
 	{TransOpts#{connection_type => supervisor}, supervisor}.
 
 -spec stop_listener(ranch:ref()) -> ok | {error, not_found}.
+
 stop_listener(Ref) ->
 	ranch:stop_listener(Ref).
 
 -spec get_env(ranch:ref(), atom()) -> ok.
+
 get_env(Ref, Name) ->
 	Opts = ranch:get_protocol_options(Ref),
 	Env = maps:get(env, Opts, #{}),
 	maps:get(Name, Env).
 
 -spec get_env(ranch:ref(), atom(), any()) -> ok.
+
 get_env(Ref, Name, Default) ->
 	Opts = ranch:get_protocol_options(Ref),
 	Env = maps:get(env, Opts, #{}),
 	maps:get(Name, Env, Default).
 
 -spec set_env(ranch:ref(), atom(), any()) -> ok.
+
 set_env(Ref, Name, Value) ->
 	Opts = ranch:get_protocol_options(Ref),
 	Env = maps:get(env, Opts, #{}),
@@ -163,10 +174,12 @@ set_env(Ref, Name, Value) ->
 %% Internal.
 
 -spec log({log, logger:level(), io:format(), list()}, opts()) -> ok.
+
 log({log, Level, Format, Args}, Opts) ->
 	log(Level, Format, Args, Opts).
 
 -spec log(logger:level(), io:format(), list(), opts()) -> ok.
+
 log(Level, Format, Args, #{logger := Logger})
 		when Logger =/= error_logger ->
 	_ = Logger:Level(Format, Args),

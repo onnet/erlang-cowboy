@@ -1533,7 +1533,7 @@ maybe_socket_error(_, Result = {ok, _}, _) ->
 maybe_socket_error(State, {error, Reason}, Human) ->
 	terminate(State, {socket_error, Reason, Human}).
 
--spec terminate(_, _) -> no_return().
+-spec terminate(#state{} | undefined, _) -> no_return().
 terminate(undefined, Reason) ->
 	exit({shutdown, Reason});
 terminate(State=#state{streams=Streams, children=Children}, Reason) ->
