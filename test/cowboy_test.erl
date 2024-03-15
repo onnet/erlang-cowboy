@@ -51,7 +51,7 @@ init_http3(Ref, ProtoOpts, Config) ->
 			{keyfile, DataDir ++ "/server.key"}
 		]
 	},
-	{ok, Listener} = cowboy:start_quic(TransOpts, ProtoOpts), %% @todo Ref argument.
+	{ok, Listener} = cowboy:start_quic(Ref, TransOpts, ProtoOpts),
 	{ok, {_, Port}} = quicer:sockname(Listener),
 	%% @todo Keep listener information around in a better place.
 	persistent_term:put({cowboy_test_quic, Ref}, Listener),

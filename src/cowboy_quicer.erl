@@ -109,17 +109,27 @@ shutdown(Conn, ErrorCode) ->
 %% Streams.
 
 -spec start_unidi_stream(quicer_connection_handle(), iodata())
-	-> {ok, cow_http3:stream_id()}.
+	-> {ok, cow_http3:stream_id()}
+	| {error, any()}.
 
 start_unidi_stream(Conn, HeaderData) ->
-	{ok, StreamRef} = quicer:start_stream(Conn, #{
-		active => true,
-		open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
-	}),
-	{ok, _} = quicer:send(StreamRef, HeaderData),
-	{ok, StreamID} = quicer:get_stream_id(StreamRef),
-	put({quicer_stream, StreamID}, StreamRef),
-	{ok, StreamID}.
+	case quicer:start_stream(Conn, #{
+			active => true,
+			open_flag => ?QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL}) of
+		{ok, StreamRef} ->
+			case quicer:send(StreamRef, HeaderData) of
+				{ok, _} ->
+					{ok, StreamID} = quicer:get_stream_id(StreamRef),
+					put({quicer_stream, StreamID}, StreamRef),
+					{ok, StreamID};
+				Error ->
+					Error
+			end;
+		{error, Reason1, Reason2} ->
+			{error, {Reason1, Reason2}};
+		Error ->
+			Error
+	end.
 
 -spec send(quicer_connection_handle(), cow_http3:stream_id(), iodata())
 	-> ok | {error, any()}.
@@ -162,7 +172,8 @@ shutdown_flag(receiving) -> ?QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE.
 	| {stream_closed, cow_http3:stream_id(), quicer_app_errno()}
 	| closed
 	| ok
-	| unknown.
+	| unknown
+	| {socket_error, any()}.
 
 handle({quic, Data, StreamRef, #{flags := Flags}}) when is_binary(Data) ->
 	{ok, StreamID} = quicer:get_stream_id(StreamRef),
@@ -173,14 +184,18 @@ handle({quic, Data, StreamRef, #{flags := Flags}}) when is_binary(Data) ->
 	{data, StreamID, IsFin, Data};
 %% QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED.
 handle({quic, new_stream, StreamRef, #{flags := Flags}}) ->
-	ok = quicer:setopt(StreamRef, active, true),
-	{ok, StreamID} = quicer:get_stream_id(StreamRef),
-	put({quicer_stream, StreamID}, StreamRef),
-	StreamType = case quicer:is_unidirectional(Flags) of
-		true -> unidi;
-		false -> bidi
-	end,
-	{stream_started, StreamID, StreamType};
+	case quicer:setopt(StreamRef, active, true) of
+		ok ->
+			{ok, StreamID} = quicer:get_stream_id(StreamRef),
+			put({quicer_stream, StreamID}, StreamRef),
+			StreamType = case quicer:is_unidirectional(Flags) of
+				true -> unidi;
+				false -> bidi
+			end,
+			{stream_started, StreamID, StreamType};
+		{error, Reason} ->
+			{socket_error, Reason}
+	end;
 %% QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE.
 handle({quic, stream_closed, StreamRef, #{error := ErrorCode}}) ->
 	{ok, StreamID} = quicer:get_stream_id(StreamRef),
