@@ -536,7 +536,13 @@ do_read_body_timeout(Path, Body, Config) ->
 	Ref = gun:headers(ConnPid, "POST", Path, [
 		{<<"content-length">>, integer_to_binary(byte_size(Body))}
 	]),
-	{response, _, 500, _} = gun:await(ConnPid, Ref, infinity),
+	case gun:await(ConnPid, Ref, infinity) of
+		{response, _, 500, _} ->
+			ok;
+		%% See do_maybe_h3_error comment for details.
+		{error, {stream_error, {stream_error, h3_internal_error, _}}} ->
+			ok
+	end,
 	gun:close(ConnPid).
 
 read_body_auto(Config) ->
@@ -1008,8 +1014,10 @@ stream_reply2_twice(Config) ->
 			zlib:inflateInit(Z, 31),
 			0 = iolist_size(zlib:inflate(Z, Data)),
 			ok;
-		%% In HTTP/2 the stream gets reset with an appropriate error.
+		%% In HTTP/2 and HTTP/3 the stream gets reset with an appropriate error.
 		{http2, _, {error, {stream_error, {stream_error, internal_error, _}}}} ->
+			ok;
+		{http3, _, {error, {stream_error, {stream_error, h3_internal_error, _}}}} ->
 			ok
 	end,
 	gun:close(ConnPid).
@@ -1224,6 +1232,10 @@ stream_trailers_set_cookie(Config) ->
 			ok;
 		http2 ->
 			{error, {stream_error, {stream_error, internal_error, _}}}
+				= gun:await_body(ConnPid, Ref, infinity),
+			ok;
+		http3 ->
+			{error, {stream_error, {stream_error, h3_internal_error, _}}}
 				= gun:await_body(ConnPid, Ref, infinity),
 			ok
 	end,
