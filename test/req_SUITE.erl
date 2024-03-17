@@ -1,4 +1,4 @@
-%% Copyright (c) 2016-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2016-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -57,13 +57,16 @@ init_dispatch(Config) ->
 		{"/resp/:key[/:arg]", resp_h, []},
 		{"/multipart[/:key]", multipart_h, []},
 		{"/args/:key/:arg[/:default]", echo_h, []},
-		{"/crash/:key/period", echo_h, #{length => 999999999, period => 1000, crash => true}},
+		{"/crash/:key/period", echo_h,
+			#{length => 999999999, period => 1000, timeout => 5000, crash => true}},
 		{"/no-opts/:key", echo_h, #{crash => true}},
 		{"/opts/:key/length", echo_h, #{length => 1000}},
 		{"/opts/:key/period", echo_h, #{length => 999999999, period => 2000}},
 		{"/opts/:key/timeout", echo_h, #{timeout => 1000, crash => true}},
 		{"/100-continue/:key", echo_h, []},
 		{"/full/:key", echo_h, []},
+		{"/auto-sync/:key", echo_h, []},
+		{"/auto-async/:key", echo_h, []},
 		{"/spawn/:key", echo_h, []},
 		{"/no/:key", echo_h, []},
 		{"/direct/:key/[...]", echo_h, []},
@@ -263,6 +266,7 @@ match_qs(Config) ->
 	end,
 	%% Ensure match errors result in a 400 response.
 	{400, _, _} = do_get("/match/qs/a/c?a=b", [], Config),
+	{400, _, _} = do_get("/match/qs_with_constraints", [], Config),
 	%% This function is tested more extensively through unit tests.
 	ok.
 
@@ -524,6 +528,12 @@ do_read_body_timeout(Path, Body, Config) ->
 	{response, _, 500, _} = gun:await(ConnPid, Ref, infinity),
 	gun:close(ConnPid).
 
+read_body_auto(Config) ->
+	doc("Read the request body using auto mode."),
+	<<0:80000000>> = do_body("POST", "/auto-sync/read_body", [], <<0:80000000>>, Config),
+	<<0:80000000>> = do_body("POST", "/auto-async/read_body", [], <<0:80000000>>, Config),
+	ok.
+
 read_body_spawn(Config) ->
 	doc("Confirm we can use cowboy_req:read_body/1,2 from another process."),
 	<<"hello world!">> = do_body("POST", "/spawn/read_body", [], "hello world!", Config),
@@ -554,7 +564,8 @@ do_read_body_expect_100_continue(Path, Config) ->
 		fin -> {ok, <<>>}
 	end,
 	gun:close(ConnPid),
-	do_decode(RespHeaders, RespBody).
+	do_decode(RespHeaders, RespBody),
+	ok.
 
 read_urlencoded_body(Config) ->
 	doc("application/x-www-form-urlencoded request body."),
@@ -581,8 +592,20 @@ do_read_urlencoded_body_too_large(Path, Body, Config) ->
 		{<<"content-length">>, integer_to_binary(iolist_size(Body))}
 	]),
 	gun:data(ConnPid, Ref, fin, Body),
-	{response, _, 413, _} = gun:await(ConnPid, Ref, infinity),
-	gun:close(ConnPid).
+	Response = gun:await(ConnPid, Ref, infinity),
+	gun:close(ConnPid),
+	case Response of
+		{response, _, 413, _} ->
+			ok;
+		%% We got the wrong crash, likely because the environment
+		%% was overloaded and the timeout triggered. Try again.
+		{response, _, 408, _} ->
+			do_read_urlencoded_body_too_large(Path, Body, Config);
+		%% Timing issues make it possible for the connection to be
+		%% closed before the data went through. We retry.
+		{error, {stream_error, {closed, {error,closed}}}} ->
+			do_read_urlencoded_body_too_large(Path, Body, Config)
+	end.
 
 read_urlencoded_body_too_long(Config) ->
 	doc("application/x-www-form-urlencoded request body sent too slow. "
@@ -800,6 +823,8 @@ set_resp_header(Config) ->
 	doc("Response using set_resp_header."),
 	{200, Headers, <<"OK">>} = do_get("/resp/set_resp_header", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _, _} = do_get("/resp/set_resp_header_cookie", Config),
 	ok.
 
 set_resp_headers(Config) ->
@@ -807,6 +832,8 @@ set_resp_headers(Config) ->
 	{200, Headers, <<"OK">>} = do_get("/resp/set_resp_headers", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers),
 	true = lists:keymember(<<"content-encoding">>, 1, Headers),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _, _} = do_get("/resp/set_resp_headers_cookie", Config),
 	ok.
 
 resp_header(Config) ->
@@ -874,6 +901,8 @@ inform2(Config) ->
 	{102, [], 200, _, _} = do_get_inform("/resp/inform2/binary", Config),
 	{500, _} = do_get_inform("/resp/inform2/error", Config),
 	{102, [], 200, _, _} = do_get_inform("/resp/inform2/twice", Config),
+	%% @todo How to test this properly? This isn't enough.
+	{200, _} = do_get_inform("/resp/inform2/after_reply", Config),
 	ok.
 
 inform3(Config) ->
@@ -882,7 +911,11 @@ inform3(Config) ->
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/102", Config),
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/binary", Config),
 	{500, _} = do_get_inform("/resp/inform3/error", Config),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _} = do_get_inform("/resp/inform3/set_cookie", Config),
 	{102, Headers, 200, _, _} = do_get_inform("/resp/inform3/twice", Config),
+	%% @todo How to test this properly? This isn't enough.
+	{200, _} = do_get_inform("/resp/inform3/after_reply", Config),
 	ok.
 
 reply2(Config) ->
@@ -892,8 +925,7 @@ reply2(Config) ->
 	{404, _, _} = do_get("/resp/reply2/404", Config),
 	{200, _, _} = do_get("/resp/reply2/binary", Config),
 	{500, _, _} = do_get("/resp/reply2/error", Config),
-	%% @todo We want to crash when reply or stream_reply is called twice.
-	%% How to test this properly? This isn't enough.
+	%% @todo How to test this properly? This isn't enough.
 	{200, _, _} = do_get("/resp/reply2/twice", Config),
 	ok.
 
@@ -906,6 +938,8 @@ reply3(Config) ->
 	{404, Headers3, _} = do_get("/resp/reply3/404", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers3),
 	{500, _, _} = do_get("/resp/reply3/error", Config),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _, _} = do_get("/resp/reply3/set_cookie", Config),
 	ok.
 
 reply4(Config) ->
@@ -914,9 +948,9 @@ reply4(Config) ->
 	{201, _, <<"OK">>} = do_get("/resp/reply4/201", Config),
 	{404, _, <<"OK">>} = do_get("/resp/reply4/404", Config),
 	{500, _, _} = do_get("/resp/reply4/error", Config),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _, _} = do_get("/resp/reply4/set_cookie", Config),
 	ok.
-
-%% @todo Crash when stream_reply is called twice.
 
 stream_reply2(Config) ->
 	doc("Response with default headers and streamed body."),
@@ -928,6 +962,33 @@ stream_reply2(Config) ->
 	{500, _, _} = do_get("/resp/stream_reply2/error", Config),
 	ok.
 
+stream_reply2_twice(Config) ->
+	doc("Attempting to stream a response twice results in a crash. "
+		"This crash can only be properly detected in HTTP/2."),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/resp/stream_reply2/twice",
+		[{<<"accept-encoding">>, <<"gzip">>}]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, infinity),
+	Protocol = config(protocol, Config),
+	Flavor = config(flavor, Config),
+	case {Protocol, Flavor, gun:await_body(ConnPid, Ref, infinity)} of
+		%% In HTTP/1.1 we cannot propagate an error at that point.
+		%% The response will simply not have a body.
+		{http, vanilla, {ok, <<>>}} ->
+			ok;
+		%% When compression was used we do get gzip headers. But
+		%% we do not have any data in the zlib stream.
+		{http, compress, {ok, Data}} ->
+			Z = zlib:open(),
+			zlib:inflateInit(Z, 31),
+			0 = iolist_size(zlib:inflate(Z, Data)),
+			ok;
+		%% In HTTP/2 the stream gets reset with an appropriate error.
+		{http2, _, {error, {stream_error, {stream_error, internal_error, _}}}} ->
+			ok
+	end,
+	gun:close(ConnPid).
+
 stream_reply3(Config) ->
 	doc("Response with additional headers and streamed body."),
 	Body = <<0:8000000>>,
@@ -938,6 +999,8 @@ stream_reply3(Config) ->
 	{404, Headers3, Body} = do_get("/resp/stream_reply3/404", Config),
 	true = lists:keymember(<<"content-type">>, 1, Headers3),
 	{500, _, _} = do_get("/resp/stream_reply3/error", Config),
+	%% The set-cookie header is special. set_resp_cookie must be used.
+	{500, _, _} = do_get("/resp/stream_reply3/set_cookie", Config),
 	ok.
 
 stream_body_fin0(Config) ->
@@ -1117,6 +1180,27 @@ stream_trailers_no_te(Config) ->
 	<<"Hello world!">> = do_decode(RespHeaders, RespBody),
 	gun:close(ConnPid).
 
+stream_trailers_set_cookie(Config) ->
+	doc("Trying to send set-cookie in trailers should result in a crash."),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/resp/stream_trailers/set_cookie", [
+		{<<"accept-encoding">>, <<"gzip">>},
+		{<<"te">>, <<"trailers">>}
+	]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, infinity),
+	case config(protocol, Config) of
+		http ->
+			%% Trailers are not sent because of the stream error.
+			{ok, _Body} = gun:await_body(ConnPid, Ref, infinity),
+			{error, timeout} = gun:await_body(ConnPid, Ref, 1000),
+			ok;
+		http2 ->
+			{error, {stream_error, {stream_error, internal_error, _}}}
+				= gun:await_body(ConnPid, Ref, infinity),
+			ok
+	end,
+	gun:close(ConnPid).
+
 do_trailers(Path, Config) ->
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, Path, [
@@ -1143,6 +1227,14 @@ push(Config) ->
 		http2 -> do_push_http2(Config)
 	end.
 
+push_after_reply(Config) ->
+	doc("Trying to push a response after the final response results in a crash."),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/resp/push/after_reply", []),
+	%% @todo How to test this properly? This isn't enough.
+	{response, fin, 200, _} = gun:await(ConnPid, Ref, infinity),
+	gun:close(ConnPid).
+
 push_method(Config) ->
 	case config(protocol, Config) of
 		http -> do_push_http("/resp/push/method", Config);
@@ -1167,7 +1259,7 @@ do_push_http(Path, Config) ->
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, Path, []),
 	{response, fin, 200, _} = gun:await(ConnPid, Ref, infinity),
-	ok.
+	gun:close(ConnPid).
 
 do_push_http2(Config) ->
 	doc("Pushed responses."),

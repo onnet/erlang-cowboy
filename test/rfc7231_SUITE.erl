@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -230,7 +230,7 @@ expect(Config) ->
 		{<<"expect">>, <<"100-continue">>}
 	]),
 	{inform, 100, _} = gun:await(ConnPid, Ref),
-	ok.
+	gun:close(ConnPid).
 
 http10_expect(Config) ->
 	case config(protocol, Config) of

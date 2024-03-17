@@ -1,4 +1,4 @@
-%% Copyright (c) 2016-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2016-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -11,6 +11,12 @@
 %% WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 %% ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+%% Note that Cowboy does not implement the PRIORITY mechanism.
+%% Everyone has been moving away from it and it is widely seen
+%% as a failure. Setting priorities has been counter productive
+%% with regards to performance. Clients have been moving away
+%% from the mechanism.
 
 -module(rfc7540_SUITE).
 -compile(export_all).
@@ -482,14 +488,6 @@ http_upgrade_client_preface_settings_ack_timeout(Config) ->
 %%   If concurrency of an initial request with subsequent requests is
 %%   important, an OPTIONS request can be used to perform the upgrade to
 %%   HTTP/2, at the cost of an additional round trip.
-
-%% @todo If we ever handle priority, we need to check that the initial
-%% HTTP/1.1 request has default priority. The relevant RFC quote is:
-%%
-%% 3.2
-%%   The HTTP/1.1 request that is sent prior to upgrade is assigned a
-%%   stream identifier of 1 (see Section 5.1.1) with default priority
-%%   values (Section 5.3.5).
 
 http_upgrade_response(Config) ->
 	doc("A response must be sent to the initial HTTP/1.1 request "
@@ -1376,7 +1374,8 @@ max_frame_size_allow_exactly_custom(Config0) ->
 		{ok, << Len2:24, 1:8, _:40 >>} = gen_tcp:recv(Socket, 9, 6000),
 		{ok, _} = gen_tcp:recv(Socket, Len2, 6000),
 		%% No errors follow due to our sending of a 25000 bytes frame.
-		{error, timeout} = gen_tcp:recv(Socket, 0, 1000)
+		{error, timeout} = gen_tcp:recv(Socket, 0, 1000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -1406,7 +1405,8 @@ max_frame_size_reject_larger_than_custom(Config0) ->
 			cow_http2:data(1, fin, <<0:30001/unit:8>>)
 		]),
 		%% Receive a FRAME_SIZE_ERROR connection error.
-		{ok, << _:24, 7:8, _:72, 6:32 >>} = gen_tcp:recv(Socket, 17, 6000)
+		{ok, << _:24, 7:8, _:72, 6:32 >>} = gen_tcp:recv(Socket, 17, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2621,9 +2621,10 @@ settings_header_table_size_server(Config0) ->
 		{ok, << Len1:24, 1:8, _:40 >>} = gen_tcp:recv(Socket, 9, 6000),
 		{ok, RespHeadersBlock1} = gen_tcp:recv(Socket, Len1, 6000),
 		{RespHeaders, _} = cow_hpack:decode(RespHeadersBlock1, DecodeState),
-		{_, <<"200">>} = lists:keyfind(<<":status">>, 1, RespHeaders)
+		{_, <<"200">>} = lists:keyfind(<<":status">>, 1, RespHeaders),
 		%% The decoding succeeded on the server, confirming that
 		%% the table size was updated to HeaderTableSize.
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2652,7 +2653,8 @@ settings_max_concurrent_streams(Config0) ->
 			cow_http2:headers(3, fin, ReqHeadersBlock2)
 		]),
 		%% Receive a REFUSED_STREAM stream error.
-		{ok, << _:24, 3:8, _:8, 3:32, 7:32 >>} = gen_tcp:recv(Socket, 13, 6000)
+		{ok, << _:24, 3:8, _:8, 3:32, 7:32 >>} = gen_tcp:recv(Socket, 13, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2676,7 +2678,8 @@ settings_max_concurrent_streams_0(Config0) ->
 		]),
 		ok = gen_tcp:send(Socket, cow_http2:headers(1, fin, HeadersBlock)),
 		%% Receive a REFUSED_STREAM stream error.
-		{ok, << _:24, 3:8, _:8, 1:32, 7:32 >>} = gen_tcp:recv(Socket, 13, 6000)
+		{ok, << _:24, 3:8, _:8, 1:32, 7:32 >>} = gen_tcp:recv(Socket, 13, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2744,7 +2747,8 @@ settings_initial_window_size(Config0) ->
 		{ok, << Len2:24, 1:8, _:40 >>} = gen_tcp:recv(Socket, 9, 6000),
 		{ok, _} = gen_tcp:recv(Socket, Len2, 6000),
 		%% No errors follow due to our sending of more than 65535 bytes of data.
-		{error, timeout} = gen_tcp:recv(Socket, 0, 1000)
+		{error, timeout} = gen_tcp:recv(Socket, 0, 1000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2787,7 +2791,8 @@ settings_initial_window_size_after_ack(Config0) ->
 			cow_http2:data(1, fin, <<0:32/unit:8>>)
 		]),
 		%% Receive a FLOW_CONTROL_ERROR stream error.
-		{ok, << _:24, 3:8, _:8, 1:32, 3:32 >>} = gen_tcp:recv(Socket, 13, 6000)
+		{ok, << _:24, 3:8, _:8, 1:32, 3:32 >>} = gen_tcp:recv(Socket, 13, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2835,7 +2840,8 @@ settings_initial_window_size_before_ack(Config0) ->
 		{ok, << Len2:24, 1:8, _:40 >>} = gen_tcp:recv(Socket, 9, 6000),
 		{ok, _} = gen_tcp:recv(Socket, Len2, 6000),
 		%% No errors follow due to our sending of more than 0 bytes of data.
-		{error, timeout} = gen_tcp:recv(Socket, 0, 1000)
+		{error, timeout} = gen_tcp:recv(Socket, 0, 1000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -2868,7 +2874,8 @@ settings_max_frame_size(Config0) ->
 		{ok, << Len2:24, 1:8, _:40 >>} = gen_tcp:recv(Socket, 9, 6000),
 		{ok, _} = gen_tcp:recv(Socket, Len2, 6000),
 		%% No errors follow due to our sending of a 25000 bytes frame.
-		{error, timeout} = gen_tcp:recv(Socket, 0, 1000)
+		{error, timeout} = gen_tcp:recv(Socket, 0, 1000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -3117,7 +3124,8 @@ data_reject_overflow(Config0) ->
 			cow_http2:data(1, fin, <<0:15000/unit:8>>)
 		]),
 		%% Receive a FLOW_CONTROL_ERROR connection error.
-		{ok, << _:24, 7:8, _:72, 3:32 >>} = gen_tcp:recv(Socket, 17, 6000)
+		{ok, << _:24, 7:8, _:72, 3:32 >>} = gen_tcp:recv(Socket, 17, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.
@@ -3165,7 +3173,8 @@ data_reject_overflow_stream(Config0) ->
 			cow_http2:data(1, fin, <<0:15000/unit:8>>)
 		]),
 		%% Receive a FLOW_CONTROL_ERROR stream error.
-		{ok, << _:24, 3:8, _:8, 1:32, 3:32 >>} = gen_tcp:recv(Socket, 13, 6000)
+		{ok, << _:24, 3:8, _:8, 1:32, 3:32 >>} = gen_tcp:recv(Socket, 13, 6000),
+		gen_tcp:close(Socket)
 	after
 		cowboy:stop_listener(?FUNCTION_NAME)
 	end.

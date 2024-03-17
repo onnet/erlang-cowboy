@@ -1,4 +1,4 @@
-%% Copyright (c) 2015-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2015-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,7 @@
 -import(cowboy_test, [raw_open/1]).
 -import(cowboy_test, [raw_send/2]).
 -import(cowboy_test, [raw_recv_head/1]).
+-import(cowboy_test, [raw_recv_rest/3]).
 -import(cowboy_test, [raw_recv/3]).
 
 suite() ->
@@ -63,13 +64,7 @@ do_raw(Config, Data) ->
 	{Headers, Rest2} = cow_http:parse_headers(Rest),
 	case lists:keyfind(<<"content-length">>, 1, Headers) of
 		{_, LengthBin} when LengthBin =/= <<"0">> ->
-			Length = binary_to_integer(LengthBin),
-			Body = if
-				byte_size(Rest2) =:= Length -> Rest2;
-				true ->
-					{ok, Body0} = raw_recv(Client, Length - byte_size(Rest2), 5000),
-					<< Rest2/bits, Body0/bits >>
-			end,
+			Body = raw_recv_rest(Client, binary_to_integer(LengthBin), Rest2),
 			#{client => Client, version => Version, code => Code, reason => Reason, headers => Headers, body => Body};
 		_ ->
 			#{client => Client, version => Version, code => Code, reason => Reason, headers => Headers, body => <<>>}
@@ -1149,18 +1144,19 @@ reject_invalid_content_length(Config) ->
 %with a message body too large must be rejected with a 413 status
 %code and the closing of the connection. (RFC7230 3.3.2)
 
-ignore_content_length_when_transfer_encoding(Config) ->
+reject_when_both_content_length_and_transfer_encoding(Config) ->
 	doc("When a message includes both transfer-encoding and content-length "
-		"headers, the content-length header must be removed before processing "
-		"the request. (RFC7230 3.3.3)"),
-	#{code := 200, body := <<"Hello world!">>} = do_raw(Config, [
+		"headers, the message may be an attempt at request smuggling. It "
+		"must be rejected with a 400 status code and the closing of the "
+		"connection. (RFC7230 3.3.3)"),
+	#{code := 400, client := Client} = do_raw(Config, [
 		"POST /echo/read_body HTTP/1.1\r\n"
 		"Host: localhost\r\n"
 		"Transfer-encoding: chunked\r\n"
 		"Content-length: 12\r\n"
 		"\r\n"
 		"6\r\nHello \r\n5\r\nworld\r\n1\r\n!\r\n0\r\n\r\n"]),
-	ok.
+	{error, closed} = raw_recv(Client, 0, 1000).
 
 %socket_error_while_reading_body(Config) ->
 %If a socket error occurs while reading the body the server
@@ -1510,6 +1506,28 @@ http10_no_connection_header_close(Config) ->
 	%% Cowboy always sends a close header back to HTTP/1.0 clients
 	%% that support keep-alive, even though it is not required.
 	{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, RespHeaders),
+	{error, closed} = raw_recv(Client, 0, 1000).
+
+connection_invalid(Config) ->
+	doc("HTTP/1.1 requests with an invalid Connection header "
+		"must be rejected with a 400 status code and the closing "
+		"of the connection. (RFC7230 6.1)"),
+	#{code := 400, client := Client} = do_raw(Config, [
+		"GET / HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"Connection: jndi{ldap127\r\n"
+		"\r\n"]),
+	{error, closed} = raw_recv(Client, 0, 1000).
+
+http10_connection_invalid(Config) ->
+	doc("HTTP/1.0 requests with an invalid Connection header "
+		"must be rejected with a 400 status code and the closing "
+		"of the connection. (RFC7230 6.1)"),
+	#{code := 400, client := Client} = do_raw(Config, [
+		"GET / HTTP/1.0\r\n"
+		"Host: localhost\r\n"
+		"Connection: jndi{ldap127\r\n"
+		"\r\n"]),
 	{error, closed} = raw_recv(Client, 0, 1000).
 
 limit_requests_keepalive(Config) ->

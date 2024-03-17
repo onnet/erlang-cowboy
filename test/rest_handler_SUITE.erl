@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -127,7 +127,7 @@ do_accept_callback_true(Config, Fun) ->
 	ok.
 
 charset_in_content_types_provided(Config) ->
-	doc("When a charset is matched explictly in content_types_provided, "
+	doc("When a charset is matched explicitly in content_types_provided, "
 		"that charset is used and the charsets_provided callback is ignored."),
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, "/charset_in_content_types_provided", [
@@ -565,6 +565,17 @@ generate_etag_missing(Config) ->
 		"the generate_etag callback is not exported."),
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, "/generate_etag?missing", [
+		{<<"accept-encoding">>, <<"gzip">>}
+	]),
+	{response, _, 200, Headers} = gun:await(ConnPid, Ref),
+	false = lists:keyfind(<<"etag">>, 1, Headers),
+	ok.
+
+generate_etag_undefined(Config) ->
+	doc("The etag header must not be sent when "
+		"the generate_etag callback returns undefined."),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/generate_etag?undefined", [
 		{<<"accept-encoding">>, <<"gzip">>}
 	]),
 	{response, _, 200, Headers} = gun:await(ConnPid, Ref),

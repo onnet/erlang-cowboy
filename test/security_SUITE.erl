@@ -1,4 +1,4 @@
-%% Copyright (c) 2018, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2018-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -33,10 +33,12 @@ groups() ->
 	Tests = [nc_rand, nc_zero],
 	H1Tests = [slowloris, slowloris_chunks],
 	H2CTests = [
+		http2_cancel_flood,
 		http2_data_dribble,
 		http2_empty_frame_flooding_data,
 		http2_empty_frame_flooding_headers_continuation,
 		http2_empty_frame_flooding_push_promise,
+		http2_infinite_continuations,
 		http2_ping_flood,
 		http2_reset_flood,
 		http2_settings_flood,
@@ -72,11 +74,50 @@ init_dispatch(_) ->
 	cowboy_router:compile([{"localhost", [
 		{"/", hello_h, []},
 		{"/echo/:key", echo_h, []},
+		{"/delay_hello", delay_hello_h, 1000},
 		{"/long_polling", long_polling_h, []},
 		{"/resp/:key[/:arg]", resp_h, []}
 	]}]).
 
 %% Tests.
+
+http2_cancel_flood(Config) ->
+	doc("Confirm that Cowboy detects the rapid reset attack. (CVE-2023-44487)"),
+	do_http2_cancel_flood(Config, 1, 500),
+	do_http2_cancel_flood(Config, 10, 50),
+	do_http2_cancel_flood(Config, 500, 1),
+	ok.
+
+do_http2_cancel_flood(Config, NumStreamsPerBatch, NumBatches) ->
+	{ok, Socket} = rfc7540_SUITE:do_handshake(Config),
+	{HeadersBlock, _} = cow_hpack:encode([
+		{<<":method">>, <<"GET">>},
+		{<<":scheme">>, <<"http">>},
+		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
+		{<<":path">>, <<"/delay_hello">>}
+	]),
+	AllStreamIDs = lists:seq(1, NumBatches * NumStreamsPerBatch * 2, 2),
+	_ = lists:foldl(
+		fun (_BatchNumber, AvailableStreamIDs) ->
+			%% Take a bunch of IDs from the available stream IDs.
+			%% Send HEADERS for all these and then cancel them.
+			{IDs, RemainingStreamIDs} = lists:split(NumStreamsPerBatch, AvailableStreamIDs),
+			_ = gen_tcp:send(Socket, [cow_http2:headers(ID, fin, HeadersBlock) || ID <- IDs]),
+			_ = gen_tcp:send(Socket, [<<4:24, 3:8, 0:8, ID:32, 8:32>> || ID <- IDs]),
+			RemainingStreamIDs
+		end,
+		AllStreamIDs,
+		lists:seq(1, NumBatches, 1)),
+	%% When Cowboy detects a flood it must close the connection.
+	case gen_tcp:recv(Socket, 17, 6000) of
+		{ok, <<_:24, 7:8, 0:8, 0:32, _LastStreamId:32, 11:32>>} ->
+			%% GOAWAY with error code 11 = ENHANCE_YOUR_CALM.
+			ok;
+		%% We also accept the connection being closed immediately,
+		%% which may happen because we send the GOAWAY right before closing.
+		{error, closed} ->
+			ok
+	end.
 
 http2_data_dribble(Config) ->
 	doc("Request a very large response then update the window 1 byte at a time. (CVE-2019-9511)"),
@@ -177,6 +218,38 @@ http2_empty_frame_flooding_push_promise(Config) ->
 	%% Cowboy rejects all PUSH_PROMISE frames therefore no flooding
 	%% can take place.
 	{ok, <<_:24, 7:8, _:72, 1:32>>} = gen_tcp:recv(Socket, 17, 6000),
+	ok.
+
+http2_infinite_continuations(Config) ->
+	doc("Confirm that Cowboy rejects CONTINUATION frames when the "
+		"total size of HEADERS + CONTINUATION(s) exceeds the limit."),
+	{ok, Socket} = rfc7540_SUITE:do_handshake(Config),
+	%% Send a HEADERS frame followed by a large number
+	%% of continuation frames.
+	{HeadersBlock, _} = cow_hpack:encode([
+		{<<":method">>, <<"GET">>},
+		{<<":scheme">>, <<"http">>},
+		{<<":authority">>, <<"localhost">>}, %% @todo Correct port number.
+		{<<":path">>, <<"/">>}
+	]),
+	HeadersBlockLen = iolist_size(HeadersBlock),
+	ok = gen_tcp:send(Socket, [
+		%% HEADERS frame.
+		<<
+			HeadersBlockLen:24, 1:8, 0:5,
+			0:1, %% END_HEADERS
+			0:1,
+			1:1, %% END_STREAM
+			0:1,
+			1:31 %% Stream ID.
+		>>,
+		HeadersBlock,
+		%% CONTINUATION frames.
+		[<<1024:24, 9:8, 0:8, 0:1, 1:31, 0:1024/unit:8>>
+			|| _ <- lists:seq(1, 100)]
+	]),
+	%% Receive an ENHANCE_YOUR_CALM connection error.
+	{ok, <<_:24, 7:8, _:72, 11:32>>} = gen_tcp:recv(Socket, 17, 6000),
 	ok.
 
 %% @todo http2_internal_data_buffering(Config) -> I do not know how to test this.

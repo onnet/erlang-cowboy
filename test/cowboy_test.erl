@@ -1,4 +1,4 @@
-%% Copyright (c) 2014-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2014-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -27,13 +27,13 @@ init_http(Ref, ProtoOpts, Config) ->
 
 init_https(Ref, ProtoOpts, Config) ->
 	Opts = ct_helper:get_certs_from_ets(),
-	{ok, _} = cowboy:start_tls(Ref, Opts ++ [{port, 0}], ProtoOpts),
+	{ok, _} = cowboy:start_tls(Ref, Opts ++ [{port, 0}, {verify, verify_none}], ProtoOpts),
 	Port = ranch:get_port(Ref),
 	[{ref, Ref}, {type, ssl}, {protocol, http}, {port, Port}, {opts, Opts}|Config].
 
 init_http2(Ref, ProtoOpts, Config) ->
 	Opts = ct_helper:get_certs_from_ets(),
-	{ok, _} = cowboy:start_tls(Ref, Opts ++ [{port, 0}], ProtoOpts),
+	{ok, _} = cowboy:start_tls(Ref, Opts ++ [{port, 0}, {verify, verify_none}], ProtoOpts),
 	Port = ranch:get_port(Ref),
 	[{ref, Ref}, {type, ssl}, {protocol, http2}, {port, Port}, {opts, Opts}|Config].
 
@@ -156,6 +156,12 @@ raw_recv_head(Socket, Transport, Buffer) ->
 		{_, _} ->
 			Buffer
 	end.
+
+raw_recv_rest({raw_client, _, _}, Length, Buffer) when Length =:= byte_size(Buffer) ->
+	Buffer;
+raw_recv_rest({raw_client, Socket, Transport}, Length, Buffer) when Length > byte_size(Buffer) ->
+	{ok, Data} = Transport:recv(Socket, Length - byte_size(Buffer), 10000),
+	<< Buffer/binary, Data/binary >>.
 
 raw_recv({raw_client, Socket, Transport}, Length, Timeout) ->
 	Transport:recv(Socket, Length, Timeout).

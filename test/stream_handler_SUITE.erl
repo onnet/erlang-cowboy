@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -293,7 +293,7 @@ flow_after_body_fully_read(Config) ->
 	%% Receive a 200 response, sent after the second flow command,
 	%% confirming that the flow command was accepted.
 	{response, _, 200, _} = gun:await(ConnPid, Ref),
-	ok.
+	gun:close(ConnPid).
 
 set_options_ignore_unknown(Config) ->
 	doc("Confirm that unknown options are ignored when using the set_options commands."),
@@ -410,7 +410,7 @@ shutdown_timeout_on_socket_close(Config) ->
 	receive {Self, Pid, terminate, _, _, _} -> ok after 1000 -> error(timeout) end,
 	%% We should NOT receive a DOWN message immediately.
 	receive {'DOWN', MRef, process, Spawn, killed} -> error(killed) after 1500 -> ok end,
-	%% We should received it now.
+	%% We should receive it now.
 	receive {'DOWN', MRef, process, Spawn, killed} -> ok after 1000 -> error(timeout) end,
 	ok.
 

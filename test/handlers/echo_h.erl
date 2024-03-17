@@ -25,6 +25,8 @@ echo(<<"read_body">>, Req0, Opts) ->
 			timer:sleep(500),
 			cowboy_req:read_body(Req0);
 		<<"/full", _/bits>> -> read_body(Req0, <<>>);
+		<<"/auto-sync", _/bits>> -> read_body_auto_sync(Req0, <<>>);
+		<<"/auto-async", _/bits>> -> read_body_auto_async(Req0, <<>>);
 		<<"/length", _/bits>> ->
 			{_, _, Req1} = read_body(Req0, <<>>),
 			Length = cowboy_req:body_length(Req1),
@@ -84,6 +86,7 @@ echo(<<"match">>, Req, Opts) ->
 	Fields = [binary_to_atom(F, latin1) || F <- Fields0],
 	Value = case Type of
 		<<"qs">> -> cowboy_req:match_qs(Fields, Req);
+		<<"qs_with_constraints">> -> cowboy_req:match_qs([{id, integer}], Req);
 		<<"cookies">> -> cowboy_req:match_cookies(Fields, Req);
 		<<"body_qs">> ->
 			%% Note that the Req should not be discarded but for the
@@ -120,6 +123,25 @@ read_body(Req0, Acc) ->
 	case cowboy_req:read_body(Req0) of
 		{ok, Data, Req} -> {ok, << Acc/binary, Data/binary >>, Req};
 		{more, Data, Req} -> read_body(Req, << Acc/binary, Data/binary >>)
+	end.
+
+read_body_auto_sync(Req0, Acc) ->
+	Opts = #{length => auto, period => infinity},
+	case cowboy_req:read_body(Req0, Opts) of
+		{ok, Data, Req} -> {ok, << Acc/binary, Data/binary >>, Req};
+		{more, Data, Req} -> read_body_auto_sync(Req, << Acc/binary, Data/binary >>)
+	end.
+
+read_body_auto_async(Req, Acc) ->
+	read_body_auto_async(Req, make_ref(), Acc).
+
+read_body_auto_async(Req, ReadBodyRef, Acc) ->
+	cowboy_req:cast({read_body, self(), ReadBodyRef, auto, infinity}, Req),
+	receive
+		{request_body, ReadBodyRef, nofin, Data} ->
+			read_body_auto_async(Req, ReadBodyRef, <<Acc/binary, Data/binary>>);
+		{request_body, ReadBodyRef, fin, _, Data} ->
+			{ok, <<Acc/binary, Data/binary>>, Req}
 	end.
 
 value_to_iodata(V) when is_integer(V) -> integer_to_binary(V);
